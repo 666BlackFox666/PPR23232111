@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily PPRBot PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=pprbot-backup.service
+
+[Install]
+WantedBy=timers.target

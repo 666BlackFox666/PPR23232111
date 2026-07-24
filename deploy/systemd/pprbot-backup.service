@@ -1,0 +1,9 @@
+[Unit]
+Description=PPRBot PostgreSQL backup
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pprbot
+ExecStart=/opt/pprbot/scripts/linux/backup-db.sh

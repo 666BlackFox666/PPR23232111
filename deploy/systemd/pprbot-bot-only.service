@@ -1,0 +1,17 @@
+[Unit]
+Description=PPRBot bot_only Docker stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/pprbot
+ExecStart=/opt/pprbot/scripts/linux/start-bot-only.sh
+ExecStop=/opt/pprbot/scripts/linux/stop-bot-only.sh
+RemainAfterExit=yes
+TimeoutStartSec=180
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target
