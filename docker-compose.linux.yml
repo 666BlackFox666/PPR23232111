@@ -1,0 +1,87 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pprbot-app:latest
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/backend
+      TZ: Europe/Moscow
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  backend:
+    image: pprbot-app:latest
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/backend
+      TZ: Europe/Moscow
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./logs:/app/logs:Z
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  bot:
+    image: pprbot-app:latest
+    command: ["python", "-m", "app.bot.runner"]
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/backend
+      TZ: Europe/Moscow
+    depends_on:
+      db:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs:Z
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
