@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -24,6 +25,7 @@ from app.services.statuses import (
     NOTIFICATION_STATUS_SENT,
     NOTIFICATION_STATUS_SKIPPED,
     PPR_STATUS_ARCHIVED,
+    PPR_STATUS_IN_PROGRESS,
     PPR_STATUS_SCHEDULED,
 )
 from app.services.telegram_sender import (
@@ -67,6 +69,39 @@ class FakeBot:
             raise self.fail
         self.edits.append(kwargs)
         return True
+
+
+class FakeDetailsMessage:
+    def __init__(self, *, old_message_id=100, chat_id=-1001, new_message_id=200, send_error=None, delete_error=None):
+        self.message_id = old_message_id
+        self.chat = SimpleNamespace(id=chat_id)
+        self.new_message_id = new_message_id
+        self.send_error = send_error
+        self.delete_error = delete_error
+        self.sent = []
+        self.delete_calls = 0
+
+    async def answer(self, text, **kwargs):
+        if self.send_error:
+            raise self.send_error
+        self.sent.append((text, kwargs))
+        return SimpleNamespace(message_id=self.new_message_id, chat=SimpleNamespace(id=self.chat.id))
+
+    async def delete(self):
+        self.delete_calls += 1
+        if self.delete_error:
+            raise self.delete_error
+
+
+class FakeDetailsCallback:
+    def __init__(self, notification_id: int, message: FakeDetailsMessage):
+        self.data = f"details:{notification_id}"
+        self.message = message
+        self.from_user = SimpleNamespace(id=9001, username="admin", first_name="Admin", last_name=None)
+        self.answers = []
+
+    async def answer(self, text=None, **kwargs):
+        self.answers.append((text, kwargs))
 
 
 class NotificationDeliveryTestCase(unittest.TestCase):
@@ -132,6 +167,80 @@ class NotificationDeliveryTestCase(unittest.TestCase):
             db.add(notif)
             db.commit()
             return notif.id
+
+    def run_details_callback(self, notification_id: int, message: FakeDetailsMessage):
+        callback = FakeDetailsCallback(notification_id, message)
+        app_user = SimpleNamespace(is_active=True, role=ROLE_ADMIN, telegram_id="9001")
+        with patch.object(bot_runner, "SessionLocal", self.SessionLocal), patch.object(
+            bot_runner, "get_or_sync_user", return_value=app_user
+        ):
+            asyncio.run(bot_runner.on_details(callback))
+        return callback
+
+    def test_details_creates_new_message_with_keyboard(self):
+        notification_id = self.create_notification()
+        message = FakeDetailsMessage()
+
+        self.run_details_callback(notification_id, message)
+
+        self.assertEqual(len(message.sent), 1)
+        _text, kwargs = message.sent[0]
+        self.assertTrue(kwargs["disable_web_page_preview"])
+        button_texts = [button.text for row in kwargs["reply_markup"].inline_keyboard for button in row]
+        self.assertIn("👀 Взять в работу", button_texts)
+
+    def test_details_saves_new_message_ids_before_replacing_original(self):
+        notification_id = self.create_notification()
+        message = FakeDetailsMessage(chat_id=-100777, new_message_id=201)
+
+        self.run_details_callback(notification_id, message)
+
+        with self.SessionLocal() as db:
+            notif = get_notification(db, notification_id)
+            self.assertEqual(notif.telegram_chat_id, "-100777")
+            self.assertEqual(notif.telegram_message_id, "201")
+
+    def test_details_deletes_original_message_after_successful_send(self):
+        notification_id = self.create_notification()
+        message = FakeDetailsMessage()
+
+        self.run_details_callback(notification_id, message)
+
+        self.assertEqual(message.delete_calls, 1)
+
+    def test_details_does_not_delete_original_when_new_message_fails(self):
+        notification_id = self.create_notification()
+        message = FakeDetailsMessage(send_error=OSError("send failed"))
+
+        callback = self.run_details_callback(notification_id, message)
+
+        self.assertEqual(message.sent, [])
+        self.assertEqual(message.delete_calls, 0)
+        self.assertEqual(callback.answers[-1], ("Не удалось открыть подробности", {"show_alert": True}))
+
+    def test_details_keeps_new_message_when_original_delete_fails(self):
+        notification_id = self.create_notification()
+        message = FakeDetailsMessage(new_message_id=202, delete_error=OSError("delete failed"))
+
+        callback = self.run_details_callback(notification_id, message)
+
+        self.assertEqual(len(message.sent), 1)
+        self.assertEqual(message.delete_calls, 1)
+        self.assertEqual(callback.answers[-1], (None, {}))
+        with self.SessionLocal() as db:
+            notif = get_notification(db, notification_id)
+            self.assertEqual(notif.telegram_message_id, "202")
+
+    def test_details_keyboard_uses_current_ppr_status(self):
+        notification_id = self.create_notification(event_status=PPR_STATUS_IN_PROGRESS)
+        message = FakeDetailsMessage()
+
+        self.run_details_callback(notification_id, message)
+
+        _text, kwargs = message.sent[0]
+        button_texts = [button.text for row in kwargs["reply_markup"].inline_keyboard for button in row]
+        self.assertIn("✅ Проверено", button_texts)
+        self.assertNotIn("👀 Взять в работу", button_texts)
 
     def test_due_notification_is_sent_once_and_message_ids_saved(self):
         notification_id = self.create_notification()

@@ -876,10 +876,51 @@ async def on_details(callback: CallbackQuery):
             await callback.answer("ППР не найдена", show_alert=True)
             return
         details = render_notification_details(notif)
+        keyboard = notification_keyboard(notif.id, notif.event.ppr_status)
+
+    if not callback.message:
+        await callback.answer("Исходное сообщение недоступно", show_alert=True)
+        return
+
+    try:
+        new_message = await callback.message.answer(
+            details,
+            reply_markup=keyboard,
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logger.exception("Failed to create details message notification_id=%s", notification_id)
+        await callback.answer("Не удалось открыть подробности", show_alert=True)
+        return
+
+    new_chat_id = getattr(getattr(new_message, "chat", None), "id", None)
+    new_message_id = getattr(new_message, "message_id", None)
+    if new_chat_id is None or new_message_id is None:
+        logger.error("Details message notification_id=%s did not contain chat/message id.", notification_id)
+        await callback.answer("Не удалось сохранить подробности", show_alert=True)
+        return
+
+    try:
+        with SessionLocal() as db:
+            fresh = get_notification(db, notification_id)
+            if not fresh:
+                logger.error("Notification %s disappeared before details message could be saved.", notification_id)
+                await callback.answer("ППР не найдена", show_alert=True)
+                return
+            fresh.telegram_chat_id = str(new_chat_id)
+            fresh.telegram_message_id = str(new_message_id)
+            db.commit()
+    except Exception:
+        logger.exception("Failed to save details message ids notification_id=%s", notification_id)
+        await callback.answer("Не удалось сохранить подробности", show_alert=True)
+        return
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        logger.warning("Failed to delete original details message notification_id=%s", notification_id, exc_info=True)
 
     await callback.answer()
-    if callback.message:
-        await callback.message.answer(details, disable_web_page_preview=True)
 
 
 @dp.callback_query(F.data.startswith("take:"))
