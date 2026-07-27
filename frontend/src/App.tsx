@@ -50,6 +50,8 @@ type FiltersState = {
 }
 
 const pageSize = 25
+const moscowTimeZone = 'Europe/Moscow'
+const timestampWithOffset = /(Z|[+-]\d{2}:?\d{2})$/i
 
 function emptyFilters(): FiltersState {
   return {
@@ -106,7 +108,21 @@ function formatTime(value?: string | null) {
 
 function formatDateTime(value?: string | null) {
   if (!value) return ''
-  return new Date(value).toLocaleString('ru-RU')
+  const timestamp = timestampWithOffset.test(value) ? value : `${value}Z`
+  const date = new Date(timestamp)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleString('ru-RU', { timeZone: moscowTimeZone })
+}
+
+function formatScheduledDateTime(value?: string | null) {
+  if (!value) return ''
+  if (timestampWithOffset.test(value)) return formatDateTime(value)
+
+  // scheduled_at is a Moscow wall-clock value from the PPR schedule, not a UTC audit timestamp.
+  const match = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/.exec(value)
+  if (!match) return ''
+  const [, year, month, day, hours, minutes, seconds] = match
+  return `${day}.${month}.${year}, ${hours}:${minutes}${seconds ? `:${seconds}` : ''}`
 }
 
 function parseNotificationStartParam(value?: string | null) {
@@ -130,6 +146,13 @@ function getStartNotificationId() {
 
 function StatusBadge({ status }: { status: string }) {
   return <span className={`badge badge-${status}`}>{statusMap[status] || status}</span>
+}
+
+function getDisplayedStatus(item: Pick<PprCard, 'is_archived' | 'requires_date' | 'notification_id' | 'status'>) {
+  if (item.is_archived) return 'archived'
+  if (item.requires_date) return 'missing_date'
+  if (item.notification_id == null) return 'no_notification'
+  return item.status
 }
 
 function InfoRow({ label, value }: { label: string; value?: string | null }) {
@@ -204,9 +227,7 @@ function ListItem({ item, onOpen }: { item: PprCard; onOpen: (item: PprCard) => 
           <b>{formatTime(item.event.start_time)}</b>
         </div>
         <div className="badge-group">
-          {item.is_archived && <span className="badge badge-archived">Архив</span>}
-          {!item.is_archived && item.requires_date && <span className="badge badge-missing_date">Нет даты</span>}
-          {!item.is_archived && !item.requires_date && <StatusBadge status={item.status} />}
+          <StatusBadge status={getDisplayedStatus(item)} />
         </div>
       </div>
       <div className="item-title">{item.event.title}</div>
@@ -607,7 +628,7 @@ function DeliveryErrorsView({ onCountChange }: { onCountChange: (count: number) 
                 </div>
                 <div className="user-fields">
                   <InfoRow label="Уведомление" value={`#${item.notification_id}`} />
-                  <InfoRow label="Запланировано" value={formatDateTime(item.scheduled_at)} />
+                  <InfoRow label="Запланировано" value={formatScheduledDateTime(item.scheduled_at)} />
                   <InfoRow label="Processing started" value={formatDateTime(item.processing_started_at)} />
                   <InfoRow label="Processing by" value={item.processing_by || 'Не заполнено'} />
                   <InfoRow label="Ошибка" value={item.last_error || 'Не заполнена'} />
@@ -636,7 +657,7 @@ function DeliveryErrorsView({ onCountChange }: { onCountChange: (count: number) 
             <div className="user-fields">
               <InfoRow label="Уведомление" value={`#${item.notification_id}`} />
               <InfoRow label="ППР" value={`#${item.event.id}`} />
-              <InfoRow label="Запланировано" value={formatDateTime(item.scheduled_at)} />
+              <InfoRow label="Запланировано" value={formatScheduledDateTime(item.scheduled_at)} />
               <InfoRow label="Попытки" value={String(item.attempt_count ?? 0)} />
               <InfoRow label="Последняя попытка" value={formatDateTime(item.last_attempt_at)} />
               <InfoRow label="Ошибка" value={item.last_error || 'Не заполнена'} />
@@ -1012,9 +1033,7 @@ function CardView({
         <div className="detail-header">
           <h1>{item.event.title}</h1>
           <div className="badge-group">
-            {item.is_archived && <span className="badge badge-archived">Архив</span>}
-            {!item.is_archived && item.requires_date && <span className="badge badge-missing_date">Нет даты</span>}
-            {!item.is_archived && !item.requires_date && <StatusBadge status={item.status} />}
+            <StatusBadge status={getDisplayedStatus(item)} />
           </div>
         </div>
 
