@@ -790,6 +790,9 @@ def apply_saved_import_preview(
         raise ImportRepeatedFile("This file was already imported. Use force mode with explicit confirmation to reapply.")
 
     preview = run.summary
+    if any(detail.get("action") in {ACTION_INVALID, ACTION_DUPLICATE, ACTION_AMBIGUOUS} for detail in preview.get("details", [])):
+        raise ImportPreviewError("Preview contains invalid, duplicate, or ambiguous rows. Fix the Excel file and run preview again.")
+
     applied = {
         "created": 0,
         "updated": 0,

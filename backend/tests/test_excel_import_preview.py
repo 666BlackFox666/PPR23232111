@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -20,6 +20,7 @@ from app.excel.import_service import (
     IMPORT_MODE_NEW_ONLY,
     IMPORT_MODE_SAFE,
     ImportFileChanged,
+    ImportPreviewError,
     ImportPreviewNotFound,
     ImportRepeatedFile,
     apply_saved_import_preview,
@@ -40,6 +41,7 @@ HEADERS = [
     "Активности",
     "Уведомлять о выходе",
     "Активно",
+    "Исходная строка",
 ]
 
 
@@ -59,6 +61,7 @@ def workbook_bytes(rows: list[dict]) -> bytes:
                 row.get("activities", "Work"),
                 row.get("notify", True),
                 row.get("active", True),
+                row.get("source_row"),
             ]
         )
     buffer = BytesIO()
@@ -93,6 +96,20 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
         with self.SessionLocal() as db:
             self.preview_and_apply(db, content)
             preview = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
+            with self.assertRaises(ImportRepeatedFile):
+                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprNotification).count(), 1)
+
+    def test_second_preview_of_same_file_is_unchanged_before_repeated_apply_is_rejected(self):
+        content = workbook_bytes([{"id": "A-REPEAT", "date": self.tomorrow, "title": "Repeat"}])
+        with self.SessionLocal() as db:
+            self.preview_and_apply(db, content)
+            preview = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
+            detail = preview["details"][0]
+            self.assertEqual(detail["action"], "unchanged")
+            self.assertEqual(detail["match_method"], "source_key")
+            self.assertTrue(preview["warnings"])
             with self.assertRaises(ImportRepeatedFile):
                 apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
             self.assertEqual(db.query(PprEvent).count(), 1)
@@ -164,11 +181,66 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
         changed = workbook_bytes([{"id": "A-6", "date": changed_date, "title": "Original"}])
         with self.SessionLocal() as db:
             self.preview_and_apply(db, first)
+            initial_notification_id = db.query(PprNotification).one().id
+            preview = build_import_preview(db, changed, "schedule.xlsx", IMPORT_MODE_SAFE)
+            self.assertEqual(preview["details"][0]["action"], "update")
+            self.assertEqual(preview["details"][0]["notification_action"], "update")
             self.preview_and_apply(db, changed)
             notifications = db.query(PprNotification).all()
             self.assertEqual(len(notifications), 1)
+            self.assertEqual(notifications[0].id, initial_notification_id)
             self.assertEqual(notifications[0].scheduled_at.date(), changed_date)
             self.assertEqual(notifications[0].status, NOTIFICATION_STATUS_PLANNED)
+
+    def test_explicit_id_matches_stable_source_key_on_changed_import(self):
+        first = workbook_bytes([{"id": "STABLE-ID-1", "date": self.tomorrow, "title": "Stable ID"}])
+        changed = workbook_bytes([{"id": "STABLE-ID-1", "date": self.tomorrow + timedelta(days=2), "title": "Stable ID"}])
+        with self.SessionLocal() as db:
+            self.preview_and_apply(db, first)
+            preview = build_import_preview(db, changed, "schedule.xlsx", IMPORT_MODE_SAFE)
+            detail = preview["details"][0]
+            self.assertEqual(detail["action"], "update")
+            self.assertEqual(detail["match_method"], "source_key")
+            self.assertEqual(detail["source_key"], "id:STABLE-ID-1")
+            self.preview_and_apply(db, changed)
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprNotification).count(), 1)
+
+    def test_duplicate_excel_rows_block_apply_without_partial_writes(self):
+        content = workbook_bytes([
+            {"id": "VALID-1", "date": self.tomorrow, "title": "Valid row"},
+            {"id": "DUPLICATE-1", "date": self.tomorrow, "title": "Duplicate row"},
+            {"id": "DUPLICATE-1", "date": self.tomorrow, "title": "Duplicate row"},
+        ])
+        with self.SessionLocal() as db:
+            preview = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
+            self.assertEqual(preview["summary"]["duplicate_rows"], 2)
+            self.assertEqual(preview["summary"]["errors_count"], 2)
+            self.assertTrue(all(item["action"] == "duplicate" for item in preview["details"] if item["external_id"] == "DUPLICATE-1"))
+
+            with self.assertRaises(ImportPreviewError):
+                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+
+            self.assertEqual(db.query(PprEvent).count(), 0)
+            self.assertEqual(db.query(PprNotification).count(), 0)
+
+    def test_ambiguous_fingerprint_blocks_apply_without_partial_writes(self):
+        content = workbook_bytes([{"date": self.tomorrow, "title": "Ambiguous import"}])
+        with self.SessionLocal() as db:
+            db.add_all([
+                PprEvent(external_id="LEGACY-A", title="Ambiguous import", project="Project", activities="Work", date=self.tomorrow, start_time=time(8, 0)),
+                PprEvent(external_id="LEGACY-B", title="Ambiguous import", project="Project", activities="Work", date=self.tomorrow, start_time=time(8, 0)),
+            ])
+            db.commit()
+
+            preview = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
+            self.assertEqual(preview["details"][0]["action"], "ambiguous")
+            self.assertEqual(preview["details"][0]["match_method"], "ambiguous")
+            with self.assertRaises(ImportPreviewError):
+                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+
+            self.assertEqual(db.query(PprEvent).count(), 2)
+            self.assertEqual(db.query(PprNotification).count(), 0)
 
     def test_missing_from_excel_is_not_archived(self):
         first = workbook_bytes([
@@ -209,6 +281,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(preview["summary"]["new_events"], 0)
             self.assertEqual(preview["summary"]["key_by_method"]["fingerprint"], 3)
             self.assertEqual(preview["summary"]["matched_existing_by_source_key"], 3)
+            self.assertTrue(all(item["match_method"] == "source_key" for item in preview["details"] if item["excel_row_number"]))
             self.preview_and_apply(db, reordered)
             self.assertEqual(db.query(PprEvent).count(), 3)
 
@@ -260,6 +333,84 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(preview["summary"]["matched_existing_by_external_id"], 1)
             self.assertEqual(preview["details"][0]["key_method"], "id")
             self.assertEqual(preview["details"][0]["match_method"], "external_id")
+
+    def test_legacy_row_keys_and_missing_source_keys_migrate_without_duplicates(self):
+        content = workbook_bytes([
+            {"date": self.tomorrow, "title": "Legacy Row Key"},
+            {"date": self.tomorrow + timedelta(days=1), "title": "Legacy Missing Key"},
+        ])
+        with self.SessionLocal() as db:
+            legacy_row_event = PprEvent(
+                external_id="ROW-2",
+                source_key="row:2",
+                title="Legacy Row Key",
+                project="Project",
+                activities="Work",
+                date=self.tomorrow,
+                start_time=time(8, 0),
+            )
+            legacy_missing_key_event = PprEvent(
+                external_id="ROW-99",
+                source_key=None,
+                title="Legacy Missing Key",
+                project="Project",
+                activities="Work",
+                date=self.tomorrow + timedelta(days=1),
+                start_time=time(8, 0),
+            )
+            db.add_all([legacy_row_event, legacy_missing_key_event])
+            db.flush()
+            db.add_all([
+                PprNotification(
+                    ppr_event_id=legacy_row_event.id,
+                    type="start",
+                    scheduled_at=datetime.combine(self.tomorrow, time(8, 0)),
+                ),
+                PprNotification(
+                    ppr_event_id=legacy_missing_key_event.id,
+                    type="start",
+                    scheduled_at=datetime.combine(self.tomorrow + timedelta(days=1), time(8, 0)),
+                ),
+            ])
+            db.commit()
+
+            preview = build_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE)
+            details = [item for item in preview["details"] if item["excel_row_number"]]
+            self.assertEqual([item["action"] for item in details], ["source_key_migration", "source_key_migration"])
+            self.assertEqual([item["match_method"] for item in details], ["legacy_row", "fingerprint"])
+            self.preview_and_apply(db, content)
+
+            events = db.query(PprEvent).order_by(PprEvent.title).all()
+            self.assertEqual(len(events), 2)
+            self.assertEqual(db.query(PprNotification).count(), 2)
+            self.assertTrue(all(event.source_key.startswith("fingerprint:") for event in events))
+            self.assertTrue(all(event.external_id.startswith("AUTO-") for event in events))
+
+    def test_manual_event_is_not_matched_or_overwritten_by_fingerprint_import(self):
+        content = workbook_bytes([{"date": self.tomorrow, "title": "Manual Boundary"}])
+        with self.SessionLocal() as db:
+            manual = PprEvent(
+                external_id="MANUAL-BOUNDARY",
+                title="Manual Boundary",
+                project="Project",
+                activities="Work",
+                date=self.tomorrow - timedelta(days=1),
+                start_time=time(7, 0),
+                comment="Do not overwrite",
+                is_manually_edited=True,
+            )
+            db.add(manual)
+            db.commit()
+
+            preview = build_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE)
+            self.assertEqual(preview["details"][0]["action"], "create")
+            self.assertEqual(preview["details"][0]["match_method"], "none")
+            self.preview_and_apply(db, content)
+
+            db.refresh(manual)
+            self.assertEqual(manual.date, self.tomorrow - timedelta(days=1))
+            self.assertEqual(manual.comment, "Do not overwrite")
+            self.assertEqual(db.query(PprEvent).count(), 2)
 
     def test_backfill_by_external_id_assigns_id_source_key(self):
         content = workbook_bytes([{"id": "BACKFILL-1", "date": self.tomorrow, "title": "Backfill ID"}])
