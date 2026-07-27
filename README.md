@@ -589,6 +589,8 @@ python -m app.bot.runner
 
 `TELEGRAM_ENABLED` отвечает за работу бота и ручные команды. `NOTIFICATIONS_AUTO_SEND_ENABLED` отвечает за массовую автоматическую отправку просроченных уведомлений. Держите `NOTIFICATIONS_AUTO_SEND_ENABLED=false`, пока не проверите бота через `/ping`, `/dryrun`, `/autosend_preview` и `/sendtest`.
 
+`SCHEDULE_AUTO_IMPORT_ENABLED` управляет периодическим импортом `schedule.xlsx` в FastAPI scheduler. По умолчанию флаг выключен (`false`), поэтому Excel не импортируется автоматически каждые 10 минут. Импорт можно выполнять вручную через предусмотренные API/CLI-команды после проверки файла.
+
 При `TELEGRAM_ENABLED=true` и `NOTIFICATIONS_AUTO_SEND_ENABLED=true` bot runner запускает отдельный async-loop автоотправки. Интервал задается `AUTO_SEND_POLL_INTERVAL_SECONDS`. Loop не блокирует aiogram polling. Уведомление перед отправкой атомарно захватывается переходом `planned -> processing`, поэтому второй runner не должен отправить тот же notification повторно. После успешной отправки статус становится `sent`, сохраняются `telegram_chat_id`, `telegram_message_id`, `sent_at`.
 
 Автоотправка обрабатывает только `planned` уведомления, у которых `auto_send_enabled=true`, ППР активна, notify включен, есть дата/время и `scheduled_at <= now`. Если due-уведомлений больше `AUTO_SEND_MASS_LIMIT`, а `AUTO_SEND_ALLOW_MASS=false`, автоотправка блокируется полностью и ничего не отправляет. Если уведомление старше `AUTO_SEND_MAX_LATE_MINUTES`, оно автоматически переводится в `skipped` с причиной `too_late`; ручная `/sendtest <id>` остается доступна.

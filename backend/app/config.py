@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     deployment_mode: Literal["bot_only", "full"] = "bot_only"
     database_url: str = "postgresql+psycopg://ppr_user:ppr_password@localhost:5432/ppr_db"
     schedule_xlsx_path: str = "./data/schedule.xlsx"
+    schedule_auto_import_enabled: bool = False
     default_timezone: str = "Europe/Moscow"
 
     telegram_enabled: bool = False

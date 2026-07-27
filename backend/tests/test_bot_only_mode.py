@@ -35,6 +35,7 @@ class BotOnlyModeTestCase(unittest.TestCase):
             "DEPLOYMENT_MODE",
             "WEBAPP_URL",
             "TELEGRAM_BOT_USERNAME",
+            "TELEGRAM_MINIAPP_SHORT_NAME",
             "ADMIN_TELEGRAM_IDS",
         )}
         os.environ["ADMIN_TELEGRAM_IDS"] = "9001"
@@ -64,6 +65,7 @@ class BotOnlyModeTestCase(unittest.TestCase):
         os.environ["DEPLOYMENT_MODE"] = mode
         os.environ["WEBAPP_URL"] = webapp_url
         os.environ["TELEGRAM_BOT_USERNAME"] = "pprsendbot"
+        os.environ["TELEGRAM_MINIAPP_SHORT_NAME"] = ""
         get_settings.cache_clear()
 
     def test_bot_only_keyboard_has_details_without_card_deep_link(self):

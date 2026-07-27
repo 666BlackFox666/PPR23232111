@@ -16,7 +16,10 @@ async def import_schedule_job():
 
 def setup_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=settings.default_timezone)
-    scheduler.add_job(import_schedule_job, "interval", minutes=10, id="import_schedule", replace_existing=True)
+    if settings.schedule_auto_import_enabled:
+        scheduler.add_job(import_schedule_job, "interval", minutes=10, id="import_schedule", replace_existing=True)
+    else:
+        logger.info("Automatic schedule import disabled.")
     if settings.notifications_auto_send_enabled:
         logger.warning("FastAPI scheduler does not send Telegram notifications. Auto-send is handled by python -m app.bot.runner.")
     return scheduler
