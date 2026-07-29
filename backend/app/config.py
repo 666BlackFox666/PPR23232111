@@ -7,9 +7,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    app_env: str = "dev"
-    env: str = ""
+    app_env: Literal["development", "production"] = "production"
     dev_commands_enabled: bool = False
+    cors_allowed_origins: str = ""
     deployment_mode: Literal["bot_only", "full"] = "bot_only"
     database_url: str = "postgresql+psycopg://ppr_user:ppr_password@localhost:5432/ppr_db"
     schedule_xlsx_path: str = "./data/schedule.xlsx"
@@ -40,6 +40,23 @@ class Settings(BaseSettings):
     outlook_client_secret: str = ""
     outlook_user_id: str = ""
     outlook_search_days_window: int = 1
+
+    @property
+    def is_development(self) -> bool:
+        return self.app_env == "development"
+
+    @property
+    def dev_auth_enabled(self) -> bool:
+        return self.is_development and self.dev_commands_enabled
+
+    @property
+    def allowed_cors_origins(self) -> list[str]:
+        origins = []
+        for value in self.cors_allowed_origins.split(","):
+            origin = value.strip().rstrip("/")
+            if origin and origin != "*" and origin not in origins:
+                origins.append(origin)
+        return origins
 
     @property
     def miniapp_enabled(self) -> bool:

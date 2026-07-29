@@ -28,7 +28,9 @@ alembic/   миграции БД
 
 ```env
 DEPLOYMENT_MODE=bot_only
+APP_ENV=production
 DEV_COMMANDS_ENABLED=false
+CORS_ALLOWED_ORIGINS=
 TELEGRAM_ENABLED=true
 NOTIFICATIONS_AUTO_SEND_ENABLED=false
 PILOT_AUTO_SEND_ALLOWED=false
@@ -328,7 +330,7 @@ NOTIFICATIONS_AUTO_SEND_ENABLED=false
 AUTO_SEND_ALLOW_MASS=false
 ```
 
-Cloudflare Quick Tunnel выдает временный `trycloudflare.com` URL. После каждого изменения URL нужно обновить `WEBAPP_URL` в `.env` и настройки Mini App в BotFather. Для боевой кнопки карточки Telegram использует `t.me` deep link, но сам Mini App все равно должен быть доступен по актуальному публичному HTTPS `WEBAPP_URL`. В `bot_only` Cloudflare не нужен.
+Cloudflare Quick Tunnel выдает временный `trycloudflare.com` URL и предназначен только для локального пилота и разработки, не для production. После каждого изменения URL нужно обновить `WEBAPP_URL` в `.env` и настройки Mini App в BotFather. Для боевой кнопки карточки Telegram использует `t.me` deep link, но сам Mini App все равно должен быть доступен по актуальному публичному HTTPS `WEBAPP_URL`. В `bot_only` Cloudflare не нужен.
 
 ## Быстрый старт backend
 
@@ -577,8 +579,8 @@ python -m app.bot.runner
 - `/sendtest` — отправляет одно ближайшее `planned`-уведомление в текущий чат и переводит его в `sent`.
 - `/sendtest <notification_id>` — отправляет конкретное уведомление.
 - `/outlooktest <notification_id>` — при включённой и полностью настроенной интеграции вручную ищет событие Outlook Calendar по названию и дате ППР, сохраняет `webLink` в БД; при выключенной интеграции сообщает, что Outlook отключён.
-- `/setoutlook <notification_id> <url>` — dev/test-команда для локальной проверки отображения Outlook-ссылки без Graph; доступна только при включённой Outlook-интеграции и `ENV=development` или `DEV_COMMANDS_ENABLED=true`.
-- `/reset_test_statuses` — dev/test-команда для сброса `sent`, `in_progress`, `checked`, `error` обратно в `planned`. Доступна только при `DEV_COMMANDS_ENABLED=true`.
+- `/setoutlook <notification_id> <url>` — dev/test-команда для локальной проверки отображения Outlook-ссылки без Graph; доступна только при включённой Outlook-интеграции, `APP_ENV=development` и `DEV_COMMANDS_ENABLED=true`.
+- `/reset_test_statuses` — dev/test-команда для сброса `sent`, `in_progress`, `checked`, `error` обратно в `planned`. Доступна только при `APP_ENV=development` и `DEV_COMMANDS_ENABLED=true`.
 - `/status` — показывает счетчики карточек ППР, общее число уведомлений и разбивку по всем статусам из БД.
 - `/users` — список пользователей; только active `admin`.
 - `/user_add <telegram_id> <admin|checker> [имя]` — добавить пользователя; только active `admin`.
@@ -692,7 +694,7 @@ python -m app.bot.runner
 - Старые уведомления старше `AUTO_SEND_MAX_LATE_MINUTES` будут автоматически помечены `skipped: too_late`, а не отправлены массово после простоя.
 - Failed-уведомления смотрите в Mini App во вкладке `Ошибки`; admin может вернуть их в `planned` кнопкой `Повторить отправку`.
 - `delivery_unknown` смотрите там же: admin либо отмечает “Сообщение уже отправлено”, либо подтверждает повторную отправку с риском дубля.
-- Перед повторным локальным тестом можно временно поставить `DEV_COMMANDS_ENABLED=true`, выполнить `/reset_test_statuses`, затем вернуть `DEV_COMMANDS_ENABLED=false`.
+- Перед повторным локальным тестом можно временно поставить `APP_ENV=development` и `DEV_COMMANDS_ENABLED=true`, выполнить `/reset_test_statuses`, затем вернуть `DEV_COMMANDS_ENABLED=false`.
 - Не включайте автоотправку, пока `/status`, `/planned`, `/autosend_preview`, `/sendtest` и открытие карточки не проверены.
 
 Автоотправка включается только после проверки:
@@ -739,7 +741,7 @@ TELEGRAM_MINIAPP_SHORT_NAME=
 WEBAPP_URL=
 ADMIN_TELEGRAM_IDS=
 TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS=86400
-ENV=development
+APP_ENV=development
 DEV_COMMANDS_ENABLED=false
 DATABASE_URL=postgresql+psycopg://ppr_user:ppr_password@localhost:5432/ppr_db
 SCHEDULE_XLSX_PATH=./data/schedule.xlsx
@@ -789,13 +791,16 @@ TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS=86400
 
 Если `telegram_id` есть в `ADMIN_TELEGRAM_IDS`, пользователь создается или обновляется как `admin`. Если пользователь уже есть в `app_users` и `is_active=true`, он получает доступ со своей ролью. Неизвестный пользователь, которого нет в `ADMIN_TELEGRAM_IDS`, получает `403 Forbidden`.
 
-Dev-заголовки работают только при:
+`APP_ENV` принимает только `development` или `production` и по умолчанию равен `production`. Dev-заголовки работают только при одновременном выполнении условий:
 
 ```env
+APP_APP_ENV=development
 DEV_COMMANDS_ENABLED=true
 ```
 
-Если `DEV_COMMANDS_ENABLED=false`, backend полностью игнорирует `X-Dev-Telegram-Id`, `X-Dev-Username` и `X-Dev-Full-Name`. Перед пилотом держите `DEV_COMMANDS_ENABLED=false`.
+Во всех остальных случаях, включая `APP_ENV=production` с ошибочно включенным `DEV_COMMANDS_ENABLED=true`, backend полностью игнорирует `X-Dev-Telegram-Id`, `X-Dev-Username` и `X-Dev-Full-Name`. Обычная Telegram `initData`-аутентификация при этом не меняется.
+
+`CORS_ALLOWED_ORIGINS` — список browser origins через запятую, например `http://127.0.0.1:5173,http://localhost:5173` для локальной разработки. Wildcard `*` не принимается; production origin будет задан отдельным этапом через `.env`.
 
 Для локальной проверки frontend без Telegram можно запустить Vite с dev-пользователем:
 
@@ -806,7 +811,7 @@ $env:VITE_DEV_FULL_NAME="Admin User"
 npm run dev -- --host 127.0.0.1 --port 5173
 ```
 
-Backend при этом тоже должен быть запущен с `DEV_COMMANDS_ENABLED=true`. В боевом Telegram Mini App эти `VITE_DEV_*` переменные не нужны: используется только `initData`.
+Backend при этом тоже должен быть запущен с `APP_APP_ENV=development` и `DEV_COMMANDS_ENABLED=true`. В production build Vite не использует `VITE_DEV_*` для формирования dev-заголовков; в боевом Telegram Mini App используется только `initData`.
 
 Проверка `/api/me` в dev:
 

@@ -238,11 +238,11 @@ def get_message_admin(db, message: Message) -> AppUser | None:
 
 
 def dev_commands_allowed() -> bool:
-    return settings.dev_commands_enabled or settings.env.strip().lower() == "development"
+    return settings.dev_auth_enabled
 
 
 def strict_dev_commands_allowed() -> bool:
-    return settings.dev_commands_enabled
+    return settings.dev_auth_enabled
 
 
 def render_planned_notification_line(index: int, notif) -> str:
@@ -710,7 +710,7 @@ async def on_setoutlook(message: Message):
         return
 
     if not dev_commands_allowed():
-        await message.answer("Команда /setoutlook доступна только при ENV=development или DEV_COMMANDS_ENABLED=true.")
+        await message.answer("Команда /setoutlook доступна только при APP_ENV=development и DEV_COMMANDS_ENABLED=true.")
         return
 
     notification_id, url = parse_setoutlook_args(message)

@@ -85,7 +85,7 @@ def get_current_user(
     try:
         if x_telegram_init_data:
             telegram_id, username, full_name = parse_telegram_user(validate_telegram_init_data(x_telegram_init_data))
-        elif settings.dev_commands_enabled:
+        elif settings.dev_auth_enabled:
             telegram_id, username, full_name = dev_telegram_user(x_dev_telegram_id, x_dev_username, x_dev_full_name)
         else:
             raise HTTPException(status_code=401, detail="Telegram initData is required")

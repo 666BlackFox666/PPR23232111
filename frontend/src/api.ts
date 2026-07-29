@@ -33,7 +33,7 @@ export function getTelegramInitData() {
 
 export function getAuthMode(): AuthMode {
   if (getTelegramInitData()) return 'telegram'
-  return import.meta.env.VITE_DEV_TELEGRAM_ID ? 'dev' : 'none'
+  return import.meta.env.DEV && import.meta.env.VITE_DEV_TELEGRAM_ID ? 'dev' : 'none'
 }
 
 function authHeaders(): Record<string, string> {
@@ -41,7 +41,7 @@ function authHeaders(): Record<string, string> {
   if (initData) {
     return { 'X-Telegram-Init-Data': initData }
   }
-  if (import.meta.env.VITE_DEV_TELEGRAM_ID) {
+  if (import.meta.env.DEV && import.meta.env.VITE_DEV_TELEGRAM_ID) {
     return {
       'X-Dev-Telegram-Id': import.meta.env.VITE_DEV_TELEGRAM_ID,
       'X-Dev-Username': import.meta.env.VITE_DEV_USERNAME || '',
