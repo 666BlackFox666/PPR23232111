@@ -14,6 +14,12 @@ export interface AppUser {
   updated_at: string
 }
 
+export interface Capabilities {
+  features: {
+    outlook: boolean
+  }
+}
+
 export interface UserCreatePayload {
   telegram_id: string
   username?: string | null

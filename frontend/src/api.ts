@@ -1,4 +1,4 @@
-import type { AppUser, DashboardSummary, ImportMode, ImportPreviewResponse, NotificationListResponse, PprCard, PprListQuery, PprListResponse, PprNotification, UserCreatePayload, UserUpdatePayload } from './types'
+import type { AppUser, Capabilities, DashboardSummary, ImportMode, ImportPreviewResponse, NotificationListResponse, PprCard, PprListQuery, PprListResponse, PprNotification, UserCreatePayload, UserUpdatePayload } from './types'
 
 declare global {
   interface Window {
@@ -117,6 +117,7 @@ function queryString(query: Record<string, unknown>) {
 
 export const api = {
   me: () => request<AppUser>('/api/me'),
+  capabilities: () => request<Capabilities>('/api/capabilities'),
   dashboardSummary: () => request<DashboardSummary>('/api/dashboard/summary'),
   pprList: (query: PprListQuery) => request<PprListResponse>(`/api/ppr${queryString(query as Record<string, unknown>)}`),
   users: () => request<AppUser[]>('/api/users'),

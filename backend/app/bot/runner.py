@@ -24,6 +24,7 @@ from app.services.outlook_graph import (
     OutlookGraphDisabledError,
     OutlookGraphNoDateError,
     OutlookGraphRequestError,
+    outlook_integration_configured,
     sync_notification_outlook_link,
 )
 from app.services.ppr_service import check_notification, get_notification, requeue_notification, take_notification
@@ -320,32 +321,32 @@ async def on_ping(message: Message):
 
 @dp.message(Command("help"))
 async def on_help(message: Message):
-    await message.answer(
-        "\n".join(
-            [
-                "Команды бота",
-                "",
-                "/ping - проверка связи",
-                "/status - счетчики и настройки",
-                "/planned - ближайшие planned-уведомления",
-                "/history [status] [limit] - история уведомлений (admin)",
-                "/dryrun - due-уведомления без отправки",
-                "/autosend_preview - preview автоотправки",
-                "/sendtest - отправить одно planned-уведомление",
-                "/notification - информация об уведомлении (admin)",
-                "/requeue - preview/очередь одного уведомления (admin)",
-                "/today - ППР на сегодня",
-                "/outlooktest - проверить Outlook-ссылку",
-                "/users - пользователи (admin)",
-                "/user_add - добавить пользователя (admin)",
-                "/user_add_reply checker - назначить checker ответом на сообщение (admin)",
-                "/user_role - изменить роль (admin)",
-                "/user_enable, /user_disable - включить/отключить пользователя (admin)",
-                "/help - список команд",
-            ]
-        )
-    )
-
+    commands = [
+        "/ping - проверка связи",
+        "/status - счетчики и настройки",
+        "/planned - ближайшие planned-уведомления",
+        "/history [status] [limit] - история уведомлений (admin)",
+        "/dryrun - due-уведомления без отправки",
+        "/autosend_preview - preview автоотправки",
+        "/sendtest - отправить одно planned-уведомление",
+        "/notification - информация об уведомлении (admin)",
+        "/requeue - preview/очередь одного уведомления (admin)",
+        "/today - ППР на сегодня",
+    ]
+    if outlook_integration_configured():
+        commands.extend([
+            "/outlooktest - проверить Outlook-ссылку",
+            "/setoutlook - установить Outlook-ссылку (dev)",
+        ])
+    commands.extend([
+        "/users - пользователи (admin)",
+        "/user_add - добавить пользователя (admin)",
+        "/user_add_reply checker - назначить checker ответом на сообщение (admin)",
+        "/user_role - изменить роль (admin)",
+        "/user_enable, /user_disable - включить/отключить пользователя (admin)",
+        "/help - список команд",
+    ])
+    await message.answer("\n".join(["Команды бота", "", *commands]))
 
 @dp.message(Command("today"))
 async def on_today(message: Message):
@@ -653,6 +654,10 @@ async def on_sendtest(message: Message, bot: Bot):
 
 @dp.message(Command("outlooktest"))
 async def on_outlooktest(message: Message):
+    if not outlook_integration_configured():
+        await message.answer("Outlook-интеграция отключена или не настроена")
+        return
+
     has_notification_id, notification_id = parse_notification_id(message)
     if not has_notification_id or notification_id is None:
         await message.answer("Использование: /outlooktest &lt;notification_id&gt;")
@@ -700,6 +705,10 @@ async def on_outlooktest(message: Message):
 
 @dp.message(Command("setoutlook"))
 async def on_setoutlook(message: Message):
+    if not outlook_integration_configured():
+        await message.answer("Outlook-интеграция отключена или не настроена")
+        return
+
     if not dev_commands_allowed():
         await message.answer("Команда /setoutlook доступна только при ENV=development или DEV_COMMANDS_ENABLED=true.")
         return

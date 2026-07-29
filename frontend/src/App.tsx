@@ -881,11 +881,13 @@ function ImportExcelView() {
 function PprFormView({
   mode,
   initial,
+  outlookEnabled,
   onCancel,
   onSaved
 }: {
   mode: 'create' | 'edit'
   initial?: PprCard
+  outlookEnabled: boolean
   onCancel: () => void
   onSaved: (item: PprCard) => void
 }) {
@@ -951,10 +953,12 @@ function PprFormView({
             <input type="checkbox" checked={form.notify} onChange={event => setField('notify', event.target.checked)} />
             <span>Отправлять уведомление</span>
           </label>
-          <label>
-            <span>Outlook-ссылка</span>
-            <input value={form.outlook_link} onChange={event => setField('outlook_link', event.target.value)} />
-          </label>
+          {outlookEnabled && (
+            <label>
+              <span>Outlook-ссылка</span>
+              <input value={form.outlook_link} onChange={event => setField('outlook_link', event.target.value)} />
+            </label>
+          )}
           <label>
             <span>Комментарий</span>
             <textarea value={form.comment} onChange={event => setField('comment', event.target.value)} />
@@ -1134,6 +1138,7 @@ export default function App() {
   const [total, setTotal] = useState(0)
   const [dashboard, setDashboard] = useState<DashboardSummary | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [outlookEnabled, setOutlookEnabled] = useState(false)
   const [accessDenied, setAccessDenied] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -1153,7 +1158,7 @@ export default function App() {
       date_state: filters.date_state,
       checker: filters.checker,
       notify: boolFilter(filters.notify),
-      outlook: boolFilter(filters.outlook),
+      outlook: outlookEnabled ? boolFilter(filters.outlook) : null,
       include_archived: includeArchived || filters.status === 'archived',
       sort,
       page: nextPage,
@@ -1210,6 +1215,12 @@ export default function App() {
       try {
         const me = await api.me()
         setCurrentUser(me)
+        try {
+          const capabilities = await api.capabilities()
+          setOutlookEnabled(capabilities.features.outlook === true)
+        } catch {
+          setOutlookEnabled(false)
+        }
       } catch (e: any) {
         setCurrentUser(null)
         if (e instanceof ApiError && e.status === 403) {
@@ -1264,7 +1275,7 @@ export default function App() {
     if (currentUser && tab !== 'users' && tab !== 'importExcel' && tab !== 'deliveryErrors') {
       load(1, false)
     }
-  }, [tab, currentUser, includeArchived, filters, sort])
+  }, [tab, currentUser, includeArchived, filters, sort, outlookEnabled])
 
   function switchTab(nextTab: TabKey) {
     setTab(nextTab)
@@ -1346,7 +1357,11 @@ export default function App() {
 
   function setFilter<K extends keyof FiltersState>(key: K, value: FiltersState[K]) {
     setPage(1)
-    setFilters(current => ({ ...current, [key]: value }))
+    setFilters(current => ({
+      ...current,
+      [key]: value,
+      ...(!outlookEnabled ? { outlook: '' } : {})
+    }))
   }
 
   const activeFilterLabels = [
@@ -1360,8 +1375,8 @@ export default function App() {
     filters.checker && `checker: ${filters.checker}`,
     filters.notify === 'true' && 'уведомление включено',
     filters.notify === 'false' && 'уведомление выключено',
-    filters.outlook === 'true' && 'есть Outlook',
-    filters.outlook === 'false' && 'нет Outlook',
+    outlookEnabled && filters.outlook === 'true' && 'есть Outlook',
+    outlookEnabled && filters.outlook === 'false' && 'нет Outlook',
     includeArchived && 'архив включен',
     filters.quick_filter && `быстрый: ${filters.quick_filter}`,
   ].filter(Boolean) as string[]
@@ -1390,6 +1405,7 @@ export default function App() {
       <PprFormView
         mode={editing.mode}
         initial={editing.item}
+        outlookEnabled={outlookEnabled}
         onCancel={() => setEditing(null)}
         onSaved={saveChangedCard}
       />
@@ -1533,6 +1549,7 @@ export default function App() {
                     <option value="false">Выключено</option>
                   </select>
                 </label>
+                {outlookEnabled && (
                 <label>
                   <span>Outlook</span>
                   <select value={filters.outlook} onChange={event => setFilter('outlook', event.target.value as FiltersState['outlook'])}>
@@ -1541,6 +1558,7 @@ export default function App() {
                     <option value="false">Нет ссылки</option>
                   </select>
                 </label>
+                )}
                 {currentUser.role === 'admin' && (
                   <label className="checkbox-row">
                     <input type="checkbox" checked={includeArchived} onChange={event => setIncludeArchived(event.target.checked)} />

@@ -22,6 +22,7 @@ from app.services.outlook_graph import (
     OutlookGraphDisabledError,
     OutlookGraphNoDateError,
     OutlookGraphRequestError,
+    outlook_integration_configured,
     sync_notification_outlook_link,
 )
 from app.services.ppr_service import (
@@ -113,6 +114,10 @@ async def read_import_upload(file: UploadFile | None) -> tuple[str, bytes]:
 @router.get("/health")
 def health():
     return {"ok": True}
+
+@router.get("/api/capabilities")
+def api_capabilities(user: AppUser = Depends(get_current_user)):
+    return {"features": {"outlook": outlook_integration_configured()}}
 
 
 @router.post("/api/import/excel")
@@ -456,6 +461,9 @@ def api_comment(
 
 @router.post("/api/outlook/sync/{notification_id}")
 async def api_outlook_sync(notification_id: int, db: Session = Depends(get_db), user: AppUser = Depends(require_roles(ROLE_ADMIN))):
+    if not outlook_integration_configured():
+        raise HTTPException(status_code=400, detail="Outlook-интеграция отключена или не настроена")
+
     notif = get_notification(db, notification_id)
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")

@@ -6,7 +6,7 @@
 - Backend FastAPI — импорт, API, БД, планировщик.
 - Telegram Bot — уведомления в чат и inline-кнопки.
 - Telegram Mini App — карточки ППР, статусы, история.
-- Outlook Graph — автоматический поиск события календаря и добавление ссылки в уведомление.
+- Outlook Graph — необязательная интеграция для поиска ссылки события; по умолчанию отключена и не нужна основному процессу.
 
 ## Структура
 
@@ -576,8 +576,8 @@ python -m app.bot.runner
 - `/autosend_preview` — показывает due-уведомления, которые попали бы в автоотправку, и статус защиты от массовой отправки.
 - `/sendtest` — отправляет одно ближайшее `planned`-уведомление в текущий чат и переводит его в `sent`.
 - `/sendtest <notification_id>` — отправляет конкретное уведомление.
-- `/outlooktest <notification_id>` — вручную ищет событие Outlook Calendar по названию и дате ППР, сохраняет `webLink` в БД.
-- `/setoutlook <notification_id> <url>` — dev/test-команда для локальной проверки отображения Outlook-ссылки без Graph. Доступна только при `ENV=development` или `DEV_COMMANDS_ENABLED=true`.
+- `/outlooktest <notification_id>` — при включённой и полностью настроенной интеграции вручную ищет событие Outlook Calendar по названию и дате ППР, сохраняет `webLink` в БД; при выключенной интеграции сообщает, что Outlook отключён.
+- `/setoutlook <notification_id> <url>` — dev/test-команда для локальной проверки отображения Outlook-ссылки без Graph; доступна только при включённой Outlook-интеграции и `ENV=development` или `DEV_COMMANDS_ENABLED=true`.
 - `/reset_test_statuses` — dev/test-команда для сброса `sent`, `in_progress`, `checked`, `error` обратно в `planned`. Доступна только при `DEV_COMMANDS_ENABLED=true`.
 - `/status` — показывает счетчики карточек ППР, общее число уведомлений и разбивку по всем статусам из БД.
 - `/users` — список пользователей; только active `admin`.
@@ -982,9 +982,9 @@ Invoke-RestMethod -Method Patch http://localhost:8000/api/ppr/273 `
 
 ## Outlook Graph
 
-Outlook по умолчанию выключен. Массовая синхронизация не запускается автоматически; проверка выполняется вручную через Telegram-команду или API.
+Outlook является необязательной функцией и по умолчанию выключен. Основной импорт, Telegram-бот и Mini App не зависят от него. При OUTLOOK_ENABLED=false автоматическая и ручная синхронизация безопасно пропускаются, а старые сохранённые ссылки продолжают отображаться.
 
-Для включения поиска события Outlook Calendar:
+Для будущего включения поиска события Outlook Calendar (это не требуется для основного контура):
 
 ```env
 OUTLOOK_ENABLED=true
