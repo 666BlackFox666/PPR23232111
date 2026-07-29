@@ -100,7 +100,7 @@ def cell(row, header_map: dict[str, int], key: str) -> Any:
     return row[col - 1].value if col else None
 
 
-def import_excel(db: Session, path: str | Path, sheet_name: str = "ППР_для_бота") -> ImportResult:
+async def import_excel(db: Session, path: str | Path, sheet_name: str = "ППР_для_бота") -> ImportResult:
     from types import SimpleNamespace
 
     from app.excel.import_service import ImportRepeatedFile, apply_saved_import_preview, read_file_bytes, save_import_preview
@@ -113,7 +113,7 @@ def import_excel(db: Session, path: str | Path, sheet_name: str = "ППР_для
         details = preview["details"]
     else:
         try:
-            applied = apply_saved_import_preview(db, preview["preview_id"], content, "safe", user)
+            applied = await apply_saved_import_preview(db, preview["preview_id"], content, "safe", user)
             summary = applied["summary"]
             details = applied["details"]
         except ImportRepeatedFile:

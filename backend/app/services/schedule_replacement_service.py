@@ -34,6 +34,7 @@ from app.excel.import_service import (
     parse_excel_content,
 )
 from app.excel.importer import cell, get_header_map
+from app.services.outlook_graph import sync_imported_events_outlook_links
 from app.services.statuses import (
     NOTIFICATION_STATUS_PLANNED,
     NOTIFICATION_STATUS_PROCESSING,
@@ -512,9 +513,10 @@ def create_schedule_backup(project: Path | None = None) -> Path:
     return _docker_backup(project or project_root())
 
 
-def _create_events_from_rows(db: Session, rows: list[ParsedExcelRow]) -> tuple[int, int]:
+def _create_events_from_rows(db: Session, rows: list[ParsedExcelRow]) -> tuple[int, int, list[PprEvent]]:
     created_events = 0
     created_notifications = 0
+    events: list[PprEvent] = []
     for row in rows:
         values = row.values
         event = PprEvent(
@@ -542,6 +544,7 @@ def _create_events_from_rows(db: Session, rows: list[ParsedExcelRow]) -> tuple[i
         db.add(event)
         db.flush()
         created_events += 1
+        events.append(event)
         if event.date and event.start_time and event.is_active and event.notify_start:
             db.add(PprNotification(
                 ppr_event_id=event.id,
@@ -552,7 +555,7 @@ def _create_events_from_rows(db: Session, rows: list[ParsedExcelRow]) -> tuple[i
                 attempt_count=0,
             ))
             created_notifications += 1
-    return created_events, created_notifications
+    return created_events, created_notifications, events
 
 
 def _detach_schedule_audit(db: Session) -> None:
@@ -595,7 +598,7 @@ def _verify_replacement(
             raise ScheduleReplacementError("Post-apply validation failed: notification sequence was reused")
 
 
-def replace_schedule_from_excel(
+async def replace_schedule_from_excel(
     db: Session,
     content: bytes,
     filename: str,
@@ -647,7 +650,7 @@ def replace_schedule_from_excel(
             rows = _build_replacement_rows(rows, "ППР_для_бота")
             if parser_errors:
                 raise ScheduleReplacementError("Excel changed or became invalid during replacement")
-            created_events, created_notifications = _create_events_from_rows(db, rows)
+            created_events, created_notifications, outlook_candidates = _create_events_from_rows(db, rows)
             comment = (
                 f"filename={filename}; sha256={preview['sha256']}; deleted_ppr={old_event_count}; "
                 f"deleted_notifications={old_notification_count}; created_ppr={created_events}; "
@@ -671,6 +674,7 @@ def replace_schedule_from_excel(
     roles_after = Counter(role for (role,) in db.query(AppUser.role).all())
     if users_after != users_before or roles_after != roles_before:
         raise ScheduleReplacementError("Post-apply validation failed: users or roles changed")
+    await sync_imported_events_outlook_links(db, outlook_candidates)
     nearest = (
         db.query(PprNotification)
         .join(PprEvent)

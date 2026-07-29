@@ -11,7 +11,7 @@ import aiohttp
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.db.models import PprNotification
+from app.db.models import PprEvent, PprNotification
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,56 @@ class OutlookGraphClient:
     async def find_calendar_link(self, title: str, event_date: date) -> str | None:
         item = await self.find_calendar_event(title, event_date)
         return item.get("webLink") if item else None
+
+
+def outlook_integration_configured() -> bool:
+    settings = get_settings()
+    return bool(
+        settings.outlook_enabled
+        and settings.outlook_tenant_id
+        and settings.outlook_client_id
+        and settings.outlook_client_secret
+        and settings.outlook_user_id
+    )
+
+
+def _rollback_outlook_sync(db: Session) -> None:
+    try:
+        db.rollback()
+    except Exception as exc:
+        logger.exception("Automatic Outlook synchronization rollback failed: %s", exc)
+
+
+async def sync_imported_events_outlook_links(db: Session, events: list[PprEvent]) -> None:
+    """Best-effort Outlook enrichment for events changed by one Excel import."""
+    try:
+        candidates = [event for event in events if event.date and not event.outlook_link]
+        if not candidates:
+            return
+        if not outlook_integration_configured():
+            logger.info("Automatic Outlook synchronization skipped: integration is not configured.")
+            return
+
+        client = OutlookGraphClient()
+        for event in candidates:
+            event_id = event.id
+            try:
+                if event.outlook_link:
+                    continue
+                link = await client.find_calendar_link(event.title, event.date)
+                if not link:
+                    logger.info("Automatic Outlook synchronization: event not found for PPR %s.", event_id)
+                    continue
+                event.outlook_link = link
+                event.updated_at = datetime.utcnow()
+                db.commit()
+                logger.info("Automatic Outlook synchronization: link found for PPR %s.", event_id)
+            except Exception as exc:
+                _rollback_outlook_sync(db)
+                logger.exception("Automatic Outlook synchronization failed for PPR %s: %s", event_id, exc)
+    except Exception as exc:
+        _rollback_outlook_sync(db)
+        logger.exception("Automatic Outlook synchronization setup failed: %s", exc)
 
 
 async def sync_notification_outlook_link(db: Session, notification: PprNotification) -> str | None:

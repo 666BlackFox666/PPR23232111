@@ -1,10 +1,11 @@
+import asyncio
 import os
 import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from openpyxl import Workbook
 from openpyxl import load_workbook
@@ -51,7 +52,9 @@ def workbook_bytes(rows):
 class ScheduleReplacementTestCase(unittest.TestCase):
     def setUp(self):
         self.previous_auto_send = os.environ.get("NOTIFICATIONS_AUTO_SEND_ENABLED")
+        self.previous_outlook_enabled = os.environ.get("OUTLOOK_ENABLED")
         os.environ["NOTIFICATIONS_AUTO_SEND_ENABLED"] = "false"
+        os.environ["OUTLOOK_ENABLED"] = "false"
         get_settings.cache_clear()
         handle = tempfile.NamedTemporaryFile(prefix="ppr-replace-", suffix=".db", delete=False)
         handle.close()
@@ -73,6 +76,10 @@ class ScheduleReplacementTestCase(unittest.TestCase):
             os.environ.pop("NOTIFICATIONS_AUTO_SEND_ENABLED", None)
         else:
             os.environ["NOTIFICATIONS_AUTO_SEND_ENABLED"] = self.previous_auto_send
+        if self.previous_outlook_enabled is None:
+            os.environ.pop("OUTLOOK_ENABLED", None)
+        else:
+            os.environ["OUTLOOK_ENABLED"] = self.previous_outlook_enabled
         get_settings.cache_clear()
 
     def valid_content(self, *rows):
@@ -91,7 +98,7 @@ class ScheduleReplacementTestCase(unittest.TestCase):
         return user, event, notification
 
     def apply(self, db, content):
-        return replace_schedule_from_excel(db, content, "schedule.xlsx", confirmation=REPLACE_CONFIRMATION, backup_creator=lambda: self.backup)
+        return asyncio.run(replace_schedule_from_excel(db, content, "schedule.xlsx", confirmation=REPLACE_CONFIRMATION, backup_creator=lambda: self.backup))
 
     def test_preview_never_changes_database(self):
         with self.SessionLocal() as db:
@@ -105,7 +112,7 @@ class ScheduleReplacementTestCase(unittest.TestCase):
         with self.SessionLocal() as db:
             self.add_old_schedule(db)
             with self.assertRaises(ScheduleReplacementError):
-                replace_schedule_from_excel(db, self.valid_content(), "schedule.xlsx", confirmation="wrong", backup_creator=lambda: self.backup)
+                asyncio.run(replace_schedule_from_excel(db, self.valid_content(), "schedule.xlsx", confirmation="wrong", backup_creator=lambda: self.backup))
             self.assertEqual(db.query(PprEvent).count(), 1)
 
     def test_invalid_excel_and_duplicates_do_not_delete_old_schedule(self):
@@ -178,7 +185,7 @@ class ScheduleReplacementTestCase(unittest.TestCase):
         with self.SessionLocal() as db:
             self.add_old_schedule(db)
             with self.assertRaises(ScheduleReplacementError):
-                replace_schedule_from_excel(db, self.valid_content(), "schedule.xlsx", confirmation=REPLACE_CONFIRMATION, backup_creator=lambda: Path("missing.dump"))
+                asyncio.run(replace_schedule_from_excel(db, self.valid_content(), "schedule.xlsx", confirmation=REPLACE_CONFIRMATION, backup_creator=lambda: Path("missing.dump")))
             self.assertEqual(db.query(PprEvent).count(), 1)
 
     def test_apply_replaces_schedule_preserves_users_and_audit(self):
@@ -199,6 +206,29 @@ class ScheduleReplacementTestCase(unittest.TestCase):
             summary = db.query(AuditLog).filter(AuditLog.action == "schedule_replaced_from_excel").one()
             self.assertIn("created_ppr=2", summary.comment)
             self.assertEqual(db.query(PprEvent).filter(PprEvent.external_id == "OLD-1").count(), 0)
+
+    def test_replacement_stays_successful_when_outlook_client_creation_fails(self):
+        content = self.valid_content({"id": "OUTLOOK-CLIENT-ERROR", "date": self.future, "title": "Client failure"})
+        with self.SessionLocal() as db:
+            self.add_old_schedule(db)
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=True), patch(
+                "app.services.outlook_graph.OutlookGraphClient", side_effect=RuntimeError("client failed")
+            ):
+                result = self.apply(db, content)
+            event = db.query(PprEvent).one()
+            self.assertEqual(result["created_ppr_events"], 1)
+            self.assertEqual(event.external_id, "OUTLOOK-CLIENT-ERROR")
+
+    def test_replacement_syncs_only_new_events_after_commit(self):
+        content = self.valid_content({"id": "OUTLOOK-REPLACE", "date": self.future, "title": "Outlook replacement"})
+        with self.SessionLocal() as db:
+            self.add_old_schedule(db)
+            with patch("app.services.schedule_replacement_service.sync_imported_events_outlook_links", new=AsyncMock()) as sync_links:
+                self.apply(db, content)
+            sync_links.assert_awaited_once()
+            synced_events = sync_links.await_args.args[1]
+            self.assertEqual([event.external_id for event in synced_events], ["OUTLOOK-REPLACE"])
+            self.assertEqual(db.query(PprEvent).count(), 1)
 
     def test_rollback_keeps_old_schedule_when_event_creation_fails(self):
         with self.SessionLocal() as db:

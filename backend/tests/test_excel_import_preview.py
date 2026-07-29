@@ -1,9 +1,11 @@
+import asyncio
 import os
 import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from openpyxl import Workbook
 from sqlalchemy import create_engine
@@ -13,7 +15,7 @@ from fastapi import HTTPException
 
 from app.api.auth import require_roles
 from app.config import get_settings
-from app.db.models import AppUser, PprEvent, PprNotification
+from app.db.models import AppUser, ImportRun, PprEvent, PprNotification
 from app.db.session import Base
 from app.excel.import_service import (
     IMPORT_MODE_FORCE,
@@ -74,6 +76,9 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
         handle = tempfile.NamedTemporaryFile(prefix="ppr-import-", suffix=".db", delete=False)
         handle.close()
         self.db_path = handle.name
+        self.previous_outlook_enabled = os.environ.get("OUTLOOK_ENABLED")
+        os.environ["OUTLOOK_ENABLED"] = "false"
+        get_settings.cache_clear()
         self.engine = create_engine(f"sqlite:///{self.db_path}", connect_args={"check_same_thread": False}, future=True)
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
         Base.metadata.create_all(bind=self.engine)
@@ -81,6 +86,11 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
         self.tomorrow = date.today() + timedelta(days=1)
 
     def tearDown(self):
+        if self.previous_outlook_enabled is None:
+            os.environ.pop("OUTLOOK_ENABLED", None)
+        else:
+            os.environ["OUTLOOK_ENABLED"] = self.previous_outlook_enabled
+        get_settings.cache_clear()
         self.engine.dispose()
         try:
             os.remove(self.db_path)
@@ -89,7 +99,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
 
     def preview_and_apply(self, db, content: bytes, mode: str = IMPORT_MODE_SAFE, confirm_force: bool = False):
         preview = save_import_preview(db, content, "schedule.xlsx", mode, self.admin)
-        return apply_saved_import_preview(db, preview["preview_id"], content, mode, self.admin, confirm_force=confirm_force)
+        return asyncio.run(apply_saved_import_preview(db, preview["preview_id"], content, mode, self.admin, confirm_force=confirm_force))
 
     def test_repeated_import_does_not_create_duplicates(self):
         content = workbook_bytes([{"id": "A-1", "date": self.tomorrow, "title": "First"}])
@@ -97,7 +107,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.preview_and_apply(db, content)
             preview = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
             with self.assertRaises(ImportRepeatedFile):
-                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+                asyncio.run(apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin))
             self.assertEqual(db.query(PprEvent).count(), 1)
             self.assertEqual(db.query(PprNotification).count(), 1)
 
@@ -111,7 +121,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(detail["match_method"], "source_key")
             self.assertTrue(preview["warnings"])
             with self.assertRaises(ImportRepeatedFile):
-                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+                asyncio.run(apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin))
             self.assertEqual(db.query(PprEvent).count(), 1)
             self.assertEqual(db.query(PprNotification).count(), 1)
 
@@ -219,7 +229,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertTrue(all(item["action"] == "duplicate" for item in preview["details"] if item["external_id"] == "DUPLICATE-1"))
 
             with self.assertRaises(ImportPreviewError):
-                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+                asyncio.run(apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin))
 
             self.assertEqual(db.query(PprEvent).count(), 0)
             self.assertEqual(db.query(PprNotification).count(), 0)
@@ -237,7 +247,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(preview["details"][0]["action"], "ambiguous")
             self.assertEqual(preview["details"][0]["match_method"], "ambiguous")
             with self.assertRaises(ImportPreviewError):
-                apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin)
+                asyncio.run(apply_saved_import_preview(db, preview["preview_id"], content, IMPORT_MODE_SAFE, self.admin))
 
             self.assertEqual(db.query(PprEvent).count(), 2)
             self.assertEqual(db.query(PprNotification).count(), 0)
@@ -262,7 +272,7 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
         with self.SessionLocal() as db:
             preview = save_import_preview(db, first, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
             with self.assertRaises(ImportFileChanged):
-                apply_saved_import_preview(db, preview["preview_id"], second, IMPORT_MODE_SAFE, self.admin)
+                asyncio.run(apply_saved_import_preview(db, preview["preview_id"], second, IMPORT_MODE_SAFE, self.admin))
 
     def test_reordered_rows_without_ids_do_not_create_duplicates(self):
         first = workbook_bytes([
@@ -485,6 +495,96 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(db.query(PprEvent).count(), 1)
 
 
+    def test_import_saves_found_outlook_link_with_mocked_graph(self):
+        content = workbook_bytes([{"id": "OUTLOOK-FOUND", "date": self.tomorrow, "title": "Found"}])
+        with self.SessionLocal() as db:
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=True), patch(
+                "app.services.outlook_graph.OutlookGraphClient.find_calendar_link", new=AsyncMock(return_value="https://outlook.example/found")
+            ) as find_link:
+                self.preview_and_apply(db, content)
+            event = db.query(PprEvent).one()
+            self.assertEqual(event.outlook_link, "https://outlook.example/found")
+            find_link.assert_awaited_once_with("Found", self.tomorrow)
+
+    def test_import_keeps_ppr_when_outlook_event_is_not_found(self):
+        content = workbook_bytes([{"id": "OUTLOOK-NOT-FOUND", "date": self.tomorrow, "title": "Missing"}])
+        with self.SessionLocal() as db:
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=True), patch(
+                "app.services.outlook_graph.OutlookGraphClient.find_calendar_link", new=AsyncMock(return_value=None)
+            ) as find_link:
+                result = self.preview_and_apply(db, content)
+            event = db.query(PprEvent).one()
+            self.assertEqual(result["applied"]["created"], 1)
+            self.assertIsNone(event.outlook_link)
+            find_link.assert_awaited_once_with("Missing", self.tomorrow)
+
+    def test_import_skips_graph_when_outlook_is_not_configured(self):
+        content = workbook_bytes([{"id": "OUTLOOK-DISABLED", "date": self.tomorrow, "title": "Disabled"}])
+        with self.SessionLocal() as db:
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=False), patch(
+                "app.services.outlook_graph.OutlookGraphClient"
+            ) as graph_client:
+                self.preview_and_apply(db, content)
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            graph_client.assert_not_called()
+
+    def test_outlook_error_does_not_rollback_import(self):
+        content = workbook_bytes([{"id": "OUTLOOK-ERROR", "date": self.tomorrow, "title": "Failure"}])
+        with self.SessionLocal() as db:
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=True), patch(
+                "app.services.outlook_graph.OutlookGraphClient.find_calendar_link", new=AsyncMock(side_effect=RuntimeError("Graph failed"))
+            ) as find_link:
+                result = self.preview_and_apply(db, content)
+            event = db.query(PprEvent).one()
+            self.assertEqual(result["applied"]["created"], 1)
+            self.assertEqual(event.external_id, "OUTLOOK-ERROR")
+            self.assertIsNone(event.outlook_link)
+            find_link.assert_awaited_once()
+
+    def test_outlook_configuration_error_does_not_mark_import_failed(self):
+        content = workbook_bytes([{"id": "OUTLOOK-CONFIG-ERROR", "date": self.tomorrow, "title": "Config failure"}])
+        with self.SessionLocal() as db:
+            with patch("app.services.outlook_graph.outlook_integration_configured", side_effect=RuntimeError("settings failed")):
+                result = self.preview_and_apply(db, content)
+            event = db.query(PprEvent).one()
+            run = db.query(ImportRun).one()
+            self.assertEqual(result["applied"]["created"], 1)
+            self.assertEqual(event.external_id, "OUTLOOK-CONFIG-ERROR")
+            self.assertEqual(run.status, "completed")
+
+    def test_outlook_error_for_one_event_does_not_stop_other_syncs(self):
+        content = workbook_bytes([
+            {"id": "OUTLOOK-FIRST", "date": self.tomorrow, "title": "First"},
+            {"id": "OUTLOOK-SECOND", "date": self.tomorrow, "title": "Second"},
+        ])
+        with self.SessionLocal() as db:
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=True), patch(
+                "app.services.outlook_graph.OutlookGraphClient.find_calendar_link",
+                new=AsyncMock(side_effect=[RuntimeError("first failed"), "https://outlook.example/second"]),
+            ) as find_link:
+                result = self.preview_and_apply(db, content)
+            second = db.query(PprEvent).filter(PprEvent.external_id == "OUTLOOK-SECOND").one()
+            self.assertEqual(result["applied"]["created"], 2)
+            self.assertEqual(second.outlook_link, "https://outlook.example/second")
+            self.assertEqual(find_link.await_count, 2)
+
+    def test_import_does_not_overwrite_existing_outlook_link(self):
+        first = workbook_bytes([{"id": "OUTLOOK-EXISTING", "date": self.tomorrow, "title": "Original"}])
+        changed = workbook_bytes([{"id": "OUTLOOK-EXISTING", "date": self.tomorrow + timedelta(days=1), "title": "Changed"}])
+        with self.SessionLocal() as db:
+            self.preview_and_apply(db, first)
+            event = db.query(PprEvent).one()
+            event.outlook_link = "https://outlook.example/existing"
+            db.commit()
+            with patch("app.services.outlook_graph.outlook_integration_configured", return_value=True), patch(
+                "app.services.outlook_graph.OutlookGraphClient.find_calendar_link", new=AsyncMock(return_value="https://outlook.example/replacement")
+            ) as find_link:
+                self.preview_and_apply(db, changed)
+            db.refresh(event)
+            self.assertEqual(event.outlook_link, "https://outlook.example/existing")
+            find_link.assert_not_awaited()
+
+
 class ExcelImportApiAuthTestCase(unittest.TestCase):
     def setUp(self):
         os.environ["DEV_COMMANDS_ENABLED"] = "true"
@@ -492,6 +592,9 @@ class ExcelImportApiAuthTestCase(unittest.TestCase):
         handle = tempfile.NamedTemporaryFile(prefix="ppr-import-api-", suffix=".db", delete=False)
         handle.close()
         self.db_path = handle.name
+        self.previous_outlook_enabled = os.environ.get("OUTLOOK_ENABLED")
+        os.environ["OUTLOOK_ENABLED"] = "false"
+        get_settings.cache_clear()
         self.engine = create_engine(f"sqlite:///{self.db_path}", connect_args={"check_same_thread": False}, future=True)
         self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False, future=True)
         Base.metadata.create_all(bind=self.engine)
@@ -503,6 +606,10 @@ class ExcelImportApiAuthTestCase(unittest.TestCase):
         self.content = workbook_bytes([{"id": "API-1", "date": date.today() + timedelta(days=1), "title": "API"}])
 
     def tearDown(self):
+        if self.previous_outlook_enabled is None:
+            os.environ.pop("OUTLOOK_ENABLED", None)
+        else:
+            os.environ["OUTLOOK_ENABLED"] = self.previous_outlook_enabled
         get_settings.cache_clear()
         self.engine.dispose()
         try:
@@ -513,7 +620,7 @@ class ExcelImportApiAuthTestCase(unittest.TestCase):
     def test_apply_without_preview_is_rejected(self):
         with self.SessionLocal() as db:
             with self.assertRaises(ImportPreviewNotFound):
-                apply_saved_import_preview(db, "missing-preview", self.content, IMPORT_MODE_SAFE, self.admin_user())
+                asyncio.run(apply_saved_import_preview(db, "missing-preview", self.content, IMPORT_MODE_SAFE, self.admin_user()))
 
     def test_checker_cannot_preview_import(self):
         dependency = require_roles(ROLE_ADMIN)

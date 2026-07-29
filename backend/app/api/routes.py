@@ -116,8 +116,8 @@ def health():
 
 
 @router.post("/api/import/excel")
-def import_excel_endpoint(db: Session = Depends(get_db), user: AppUser = Depends(require_roles(ROLE_ADMIN))):
-    result = import_excel(db, settings.schedule_xlsx_path)
+async def import_excel_endpoint(db: Session = Depends(get_db), user: AppUser = Depends(require_roles(ROLE_ADMIN))):
+    result = await import_excel(db, settings.schedule_xlsx_path)
     return result.__dict__
 
 
@@ -148,7 +148,7 @@ async def import_excel_apply_endpoint(
         raise HTTPException(status_code=409, detail="Preview is required. Run /api/import/excel/preview first.")
     filename, content = await read_import_upload(file)
     try:
-        return apply_saved_import_preview(db, preview_id, content, mode, user, confirm_force=confirm_force)
+        return await apply_saved_import_preview(db, preview_id, content, mode, user, confirm_force=confirm_force)
     except ImportPreviewNotFound as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ImportFileChanged as exc:

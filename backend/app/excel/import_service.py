@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import AuditLog, ImportRun, PprEvent, PprNotification
 from app.excel.importer import HEADER_ALIASES, cell, combine_datetime, get_header_map, parse_bool, parse_date, parse_time
+from app.services.outlook_graph import sync_imported_events_outlook_links
 from app.services.ppr_service import describe_changes, sync_start_notification
 from app.services.statuses import (
     NOTIFICATION_STATUS_CANCELLED,
@@ -766,7 +767,7 @@ def duplicate_successful_import_exists(db: Session, file_hash: str, exclude_id: 
     return query.first() is not None
 
 
-def apply_saved_import_preview(
+async def apply_saved_import_preview(
     db: Session,
     preview_id: str,
     content: bytes,
@@ -804,6 +805,7 @@ def apply_saved_import_preview(
     run.started_at = now
     run.status = "applying"
     run.error_message = None
+    outlook_candidates: list[PprEvent] = []
 
     try:
         for detail in preview.get("details", []):
@@ -831,6 +833,7 @@ def apply_saved_import_preview(
                 apply_values_to_event(event, values)
                 add_import_audit(db, event, "import_created", user, f"Excel import {preview_id}")
                 applied["created"] += 1
+                outlook_candidates.append(event)
             elif event is None:
                 applied["skipped"] += 1
                 continue
@@ -841,6 +844,8 @@ def apply_saved_import_preview(
                     event.manual_updated_at = None
                     add_import_audit(db, event, "import_updated", user, describe_changes(changes))
                     applied["updated"] += 1
+                    if action == ACTION_UPDATE:
+                        outlook_candidates.append(event)
                 else:
                     applied["unchanged"] += 1
 
@@ -858,6 +863,7 @@ def apply_saved_import_preview(
         run.started_by_name = user_display(user)
         run.summary = completed_summary
         db.commit()
+        await sync_imported_events_outlook_links(db, outlook_candidates)
         return completed_summary
     except Exception as exc:
         db.rollback()

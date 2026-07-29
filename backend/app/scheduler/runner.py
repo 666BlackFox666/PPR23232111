@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 async def import_schedule_job():
     with SessionLocal() as db:
-        import_excel(db, settings.schedule_xlsx_path)
+        await import_excel(db, settings.schedule_xlsx_path)
 
 
 def setup_scheduler() -> AsyncIOScheduler:

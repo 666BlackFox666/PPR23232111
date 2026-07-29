@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -61,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                 preview = build_schedule_replacement_preview(db, content, filename)
                 print_json(preview)
                 return 0 if not preview["errors"] else 2
-            result = replace_schedule_from_excel(db, content, filename, confirmation=args.confirm)
+            result = asyncio.run(replace_schedule_from_excel(db, content, filename, confirmation=args.confirm))
             print_json(result)
             return 0
         except ScheduleValidationError as exc:
