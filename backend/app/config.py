@@ -1,6 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +15,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://ppr_user:ppr_password@localhost:5432/ppr_db"
     schedule_xlsx_path: str = "./data/schedule.xlsx"
     schedule_auto_import_enabled: bool = False
+    schedule_auto_import_interval_minutes: int = Field(default=10, ge=1)
     default_timezone: str = "Europe/Moscow"
 
     telegram_enabled: bool = False

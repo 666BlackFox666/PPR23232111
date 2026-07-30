@@ -15,7 +15,12 @@ from sqlalchemy.orm import sessionmaker
 from app.config import get_settings
 from app.db.models import AppUser, AuditLog, PprEvent, PprNotification
 from app.db.session import Base
-from app.excel.import_service import IMPORT_MODE_SAFE, build_import_preview
+from app.excel.import_service import (
+    IMPORT_MODE_SAFE,
+    apply_saved_import_preview,
+    build_import_preview,
+    save_import_preview,
+)
 from app.services.schedule_replacement_service import (
     REPLACE_CONFIRMATION,
     ScheduleReplacementError,
@@ -172,6 +177,33 @@ class ScheduleReplacementTestCase(unittest.TestCase):
             self.assertEqual(db.query(PprEvent).count(), 2)
             self.assertEqual(db.query(PprEvent.source_key).distinct().count(), 2)
 
+    def test_equal_text_on_different_dates_stays_as_two_real_pprs(self):
+        content = workbook_bytes(
+            [
+                {"date": self.future, "title": "Repeated dated event"},
+                {
+                    "date": self.future + timedelta(days=1),
+                    "title": "Repeated dated event",
+                },
+            ]
+        )
+        with self.SessionLocal() as db:
+            self.add_old_schedule(db)
+            preview = build_schedule_replacement_preview(
+                db, content, "schedule.xlsx"
+            )
+            self.assertFalse(preview["errors"])
+            self.assertEqual(preview["new_excel"]["ambiguous_fingerprint_groups"], 1)
+
+            self.apply(db, content)
+
+            self.assertEqual(db.query(PprEvent).count(), 2)
+            self.assertEqual(db.query(PprNotification).count(), 2)
+            self.assertEqual(
+                {event.date for event in db.query(PprEvent).all()},
+                {self.future, self.future + timedelta(days=1)},
+            )
+
     def test_incremental_import_keeps_its_existing_fingerprint_behavior(self):
         content = workbook_bytes([
             {"date": None, "start_time": None, "title": "Repeated"},
@@ -248,6 +280,103 @@ class ScheduleReplacementTestCase(unittest.TestCase):
             self.assertEqual(db.query(PprEvent).count(), 1)
             self.assertEqual(db.query(PprNotification).count(), 1)
             self.assertEqual(db.query(PprEvent.source_key).distinct().count(), 1)
+
+    def test_incremental_import_after_replacement_reuses_unique_fingerprint(self):
+        content = self.valid_content(
+            {
+                "date": None,
+                "start_time": None,
+                "title": "Missing date after replacement",
+                "activities": "Keep this card unique",
+            }
+        )
+        with self.SessionLocal() as db:
+            self.add_old_schedule(db)
+            self.apply(db, content)
+            replaced = db.query(PprEvent).one()
+            self.assertTrue(replaced.source_key.startswith("replace-row:"))
+
+            admin = db.query(AppUser).one()
+            preview = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, admin)
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["match_method"], "fingerprint")
+            self.assertEqual(detail["action"], "source_key_migration")
+            asyncio.run(
+                apply_saved_import_preview(
+                    db,
+                    preview["preview_id"],
+                    content,
+                    IMPORT_MODE_SAFE,
+                    admin,
+                )
+            )
+
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprNotification).count(), 0)
+            self.assertTrue(db.query(PprEvent).one().source_key.startswith("fingerprint:"))
+
+    def test_incremental_import_assigns_date_to_undated_replacement_event(self):
+        undated = self.valid_content(
+            {
+                "date": None,
+                "start_time": None,
+                "title": "Replacement date assigned later",
+            }
+        )
+        dated = self.valid_content(
+            {
+                "date": self.future,
+                "title": "Replacement date assigned later",
+            }
+        )
+        with self.SessionLocal() as db:
+            self.add_old_schedule(db)
+            self.apply(db, undated)
+            admin = db.query(AppUser).one()
+
+            preview = save_import_preview(
+                db, dated, "schedule.xlsx", IMPORT_MODE_SAFE, admin
+            )
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["action"], "update")
+            self.assertEqual(detail["match_method"], "fingerprint")
+            asyncio.run(
+                apply_saved_import_preview(
+                    db,
+                    preview["preview_id"],
+                    dated,
+                    IMPORT_MODE_SAFE,
+                    admin,
+                )
+            )
+
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprNotification).count(), 1)
+            self.assertEqual(db.query(PprEvent).one().date, self.future)
+
+    def test_incremental_import_after_replacement_blocks_ambiguous_fingerprint(self):
+        content = self.valid_content(
+            {"date": None, "start_time": None, "title": "Repeated"},
+            {"date": None, "start_time": None, "title": "Repeated"},
+        )
+        with self.SessionLocal() as db:
+            self.add_old_schedule(db)
+            self.apply(db, content)
+
+            preview = build_import_preview(
+                db,
+                self.valid_content(
+                    {"date": None, "start_time": None, "title": "Repeated"}
+                ),
+                "schedule.xlsx",
+                IMPORT_MODE_SAFE,
+            )
+
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["action"], "ambiguous")
+            self.assertEqual(detail["match_method"], "ambiguous")
+            self.assertEqual(db.query(PprEvent).count(), 2)
+            self.assertEqual(db.query(PprNotification).count(), 0)
 
     def test_auto_send_and_processing_block_replacement(self):
         with self.SessionLocal() as db:

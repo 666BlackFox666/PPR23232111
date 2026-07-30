@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import os
+import re
 import socket
 import sys
 from datetime import datetime
-from html import escape
+from html import escape, unescape
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from uuid import uuid4
@@ -15,7 +16,11 @@ from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
-from app.bot.keyboards import is_card_deep_link_configured, notification_keyboard
+from app.bot.keyboards import (
+    create_ppr_preview_keyboard,
+    is_card_deep_link_configured,
+    notification_keyboard,
+)
 from app.config import get_settings
 from app.db.models import AppUser
 from app.db.session import SessionLocal
@@ -27,7 +32,25 @@ from app.services.outlook_graph import (
     outlook_integration_configured,
     sync_notification_outlook_link,
 )
-from app.services.ppr_service import check_notification, get_notification, requeue_notification, take_notification
+from app.services.create_ppr_service import (
+    CreatePprPreviewAccessDenied,
+    CreatePprPreviewCapacityExceeded,
+    CreatePprPreviewExpired,
+    CreatePprPreviewNotFound,
+    CreatePprPreviewStore,
+    CreatePprValidationError,
+    ensure_create_ppr_draft_is_future,
+    parse_create_ppr_command,
+)
+from app.services.ppr_service import (
+    PprDuplicateError,
+    check_notification,
+    create_ppr_event,
+    find_active_ppr_duplicate,
+    get_notification,
+    requeue_notification,
+    take_notification,
+)
 from app.services.telegram_sender import (
     build_autosend_preview,
     get_due_notifications,
@@ -66,6 +89,8 @@ settings = get_settings()
 dp = Dispatcher()
 logger = logging.getLogger(__name__)
 WORKER_ID = f"bot:{socket.gethostname()}:{os.getpid()}:{uuid4().hex[:8]}"
+create_ppr_previews = CreatePprPreviewStore()
+TELEGRAM_MESSAGE_MAX_UTF16_UNITS = 4096
 
 
 class SecretRedactionFilter(logging.Filter):
@@ -256,6 +281,58 @@ def telegram_user_full_name(user) -> str | None:
     return " ".join(filter(None, [user.first_name, user.last_name])).strip() or None
 
 
+def render_create_ppr_preview(draft) -> str:
+    activities = escape(draft.activities) if draft.activities else "не указаны"
+    return "\n".join(
+        [
+            "<b>Preview новой ППР</b>",
+            "",
+            f"<b>Название:</b> {escape(draft.title)}",
+            f"<b>Проект:</b> {escape(draft.project)}",
+            f"<b>Дата:</b> {draft.event_date.isoformat()}",
+            f"<b>Время:</b> {draft.start_time.strftime('%H:%M')}",
+            f"<b>Активности:</b> {activities}",
+            "<b>Тип уведомления:</b> start",
+            f"<b>scheduled_at:</b> {draft.scheduled_at.isoformat(sep=' ', timespec='minutes')}",
+            f"<b>auto_send_enabled:</b> {str(draft.auto_send_enabled).lower()}",
+            "",
+            "После подтверждения запись попадёт в рабочую очередь уведомлений.",
+        ]
+    )
+
+
+def telegram_html_text_utf16_length(text: str) -> int:
+    plain_text = unescape(re.sub(r"<[^>]*>", "", text))
+    return len(plain_text.encode("utf-16-le")) // 2
+
+
+def render_create_ppr_success(event) -> str:
+    notification = next(
+        (item for item in event.notifications if item.type == "start"),
+        None,
+    )
+    notification_id = notification.id if notification else "не создано"
+    scheduled_at = (
+        notification.scheduled_at.isoformat(sep=" ", timespec="minutes")
+        if notification
+        else "не назначено"
+    )
+    auto_send_enabled = (
+        str(notification.auto_send_enabled).lower() if notification else "false"
+    )
+    return "\n".join(
+        [
+            "<b>ППР создана</b>",
+            f"<b>PPR ID:</b> {event.id}",
+            f"<b>Notification ID:</b> {notification_id}",
+            f"<b>Название:</b> {escape(event.title)}",
+            f"<b>scheduled_at:</b> {scheduled_at}",
+            "<b>status:</b> planned",
+            f"<b>auto_send_enabled:</b> {auto_send_enabled}",
+        ]
+    )
+
+
 async def send_due_notifications_job(bot: Bot, worker_id: str = WORKER_ID) -> None:
     if not telegram_sending_available():
         return
@@ -332,6 +409,7 @@ async def on_help(message: Message):
         "/notification - информация об уведомлении (admin)",
         "/requeue - preview/очередь одного уведомления (admin)",
         "/today - ППР на сегодня",
+        "/createppr - создать ППР через Preview (admin)",
     ]
     if outlook_integration_configured():
         commands.extend([
@@ -347,6 +425,160 @@ async def on_help(message: Message):
         "/help - список команд",
     ])
     await message.answer("\n".join(["Команды бота", "", *commands]))
+
+
+@dp.message(Command("createppr"))
+async def on_createppr(message: Message):
+    telegram_user = message.from_user
+    if telegram_user is None:
+        await message.answer("Нет доступа")
+        return
+    with SessionLocal() as db:
+        app_user = get_or_sync_user(
+            db,
+            str(telegram_user.id),
+            telegram_user.username,
+            telegram_user_full_name(telegram_user),
+        )
+        if not is_active_admin_user(app_user):
+            await message.answer("Нет доступа")
+            return
+        try:
+            draft = parse_create_ppr_command(
+                message.text,
+                timezone_name=settings.default_timezone,
+            )
+        except CreatePprValidationError as exc:
+            await message.answer(escape(str(exc)))
+            return
+
+        duplicate = find_active_ppr_duplicate(
+            db,
+            title=draft.title,
+            project=draft.project,
+            event_date=draft.event_date,
+            start_time=draft.start_time,
+        )
+        if duplicate:
+            await message.answer(
+                f"ППР не создана: найдена потенциально дублирующая запись ID {duplicate.id}."
+            )
+            return
+
+    preview_text = render_create_ppr_preview(draft)
+    if telegram_html_text_utf16_length(preview_text) > TELEGRAM_MESSAGE_MAX_UTF16_UNITS:
+        await message.answer(
+            "Preview слишком длинный для Telegram. Сократите название, проект или активности."
+        )
+        return
+    try:
+        preview = create_ppr_previews.create(
+            draft,
+            telegram_user_id=str(telegram_user.id),
+            chat_id=str(message.chat.id),
+        )
+    except CreatePprPreviewCapacityExceeded as exc:
+        await message.answer(escape(str(exc)))
+        return
+    await message.answer(
+        preview_text,
+        reply_markup=create_ppr_preview_keyboard(preview.token),
+        disable_web_page_preview=True,
+    )
+
+
+def _createppr_callback_token(data: str | None, action: str) -> str | None:
+    prefix = f"createppr:{action}:"
+    if not data or not data.startswith(prefix):
+        return None
+    token = data[len(prefix) :]
+    return token if len(token) == 32 and all(char in "0123456789abcdef" for char in token) else None
+
+
+@dp.callback_query(F.data.startswith("createppr:confirm:"))
+async def on_createppr_confirm(callback: CallbackQuery):
+    token = _createppr_callback_token(callback.data, "confirm")
+    if token is None or callback.message is None:
+        await callback.answer("Некорректный Preview", show_alert=True)
+        return
+    telegram_user = callback.from_user
+    chat_id = str(callback.message.chat.id)
+
+    with SessionLocal() as db:
+        app_user = get_or_sync_user(
+            db,
+            str(telegram_user.id),
+            telegram_user.username,
+            telegram_user_full_name(telegram_user),
+        )
+        if not is_active_admin_user(app_user):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        try:
+            preview = create_ppr_previews.consume(
+                token,
+                telegram_user_id=str(telegram_user.id),
+                chat_id=chat_id,
+            )
+        except (
+            CreatePprPreviewNotFound,
+            CreatePprPreviewExpired,
+            CreatePprPreviewAccessDenied,
+        ) as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+        try:
+            ensure_create_ppr_draft_is_future(
+                preview.draft,
+                timezone_name=settings.default_timezone,
+            )
+            event = create_ppr_event(db, preview.draft.payload(), app_user)
+        except CreatePprValidationError as exc:
+            await callback.answer(str(exc), show_alert=True)
+            return
+        except PprDuplicateError as exc:
+            await callback.answer(
+                f"ППР не создана: найдена дублирующая запись ID {exc.event_id}.",
+                show_alert=True,
+            )
+            return
+
+    await callback.message.edit_text(render_create_ppr_success(event))
+    await callback.answer("ППР создана")
+
+
+@dp.callback_query(F.data.startswith("createppr:cancel:"))
+async def on_createppr_cancel(callback: CallbackQuery):
+    token = _createppr_callback_token(callback.data, "cancel")
+    if token is None or callback.message is None:
+        await callback.answer("Некорректный Preview", show_alert=True)
+        return
+    telegram_user = callback.from_user
+    with SessionLocal() as db:
+        app_user = get_or_sync_user(
+            db,
+            str(telegram_user.id),
+            telegram_user.username,
+            telegram_user_full_name(telegram_user),
+        )
+        if not is_active_admin_user(app_user):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+    try:
+        create_ppr_previews.cancel(
+            token,
+            telegram_user_id=str(telegram_user.id),
+            chat_id=str(callback.message.chat.id),
+        )
+    except (
+        CreatePprPreviewNotFound,
+        CreatePprPreviewExpired,
+        CreatePprPreviewAccessDenied,
+    ) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.message.edit_text("Создание ППР отменено.")
+    await callback.answer("Отменено")
 
 @dp.message(Command("today"))
 async def on_today(message: Message):

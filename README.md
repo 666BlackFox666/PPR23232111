@@ -586,12 +586,21 @@ python -m app.bot.runner
 - `/user_add <telegram_id> <admin|checker> [имя]` — добавить пользователя; только active `admin`.
 - `/user_role <telegram_id> <admin|checker>` — изменить роль; только active `admin`.
 - `/user_enable <telegram_id>` и `/user_disable <telegram_id>` — включить или отключить пользователя; только active `admin`.
+- `/createppr YYYY-MM-DD HH:MM | Проект | Название ППР | Активности` — создать новую ППР через Preview; только active `admin`. Поле «Активности» может быть пустым после последнего `|`.
+
+Пример:
+
+```text
+/createppr 2026-08-03 09:00 | ППР инфраструктуры | Проверка резервного копирования | Проверить backup, журнал и восстановление
+```
+
+Команда сначала показывает Preview с датой, временем, `scheduled_at`, типом `start` и `auto_send_enabled`. Запись в БД появляется только после нажатия «✅ Создать»; «❌ Отмена» инвалидирует Preview. Подтверждение доступно только создавшему Preview admin в исходном чате в течение 10 минут. Повторное подтверждение не создаёт вторую ППР. Перед Preview и непосредственно перед созданием проверяется активная ППР с теми же нормализованными названием, проектом, датой и временем.
 
 В Telegram-only управлении нельзя отключить самого себя без отдельного подтверждения. Пользователей из `ADMIN_TELEGRAM_IDS` нельзя понизить до `checker` или отключить. Изменения пользователей записываются в `audit_log`; checker получает `Нет доступа`.
 
 `TELEGRAM_ENABLED` отвечает за работу бота и ручные команды. `NOTIFICATIONS_AUTO_SEND_ENABLED` отвечает за массовую автоматическую отправку просроченных уведомлений. Держите `NOTIFICATIONS_AUTO_SEND_ENABLED=false`, пока не проверите бота через `/ping`, `/dryrun`, `/autosend_preview` и `/sendtest`.
 
-`SCHEDULE_AUTO_IMPORT_ENABLED` управляет периодическим импортом `schedule.xlsx` в FastAPI scheduler. По умолчанию флаг выключен (`false`), поэтому Excel не импортируется автоматически каждые 10 минут. Импорт можно выполнять вручную через предусмотренные API/CLI-команды после проверки файла.
+`SCHEDULE_AUTO_IMPORT_ENABLED` управляет периодическим импортом `schedule.xlsx` в FastAPI scheduler. По умолчанию флаг выключен (`false`), поэтому job не регистрируется и Excel автоматически не импортируется. При включении интервал задаётся `SCHEDULE_AUTO_IMPORT_INTERVAL_MINUTES` (целое число не меньше 1, по умолчанию 10). Если `SCHEDULE_XLSX_PATH` отсутствует или временно недоступен, текущая итерация пишет предупреждение и завершается без остановки backend; следующая итерация повторит попытку. Неизменившийся уже применённый файл обрабатывается как no-op без накопления новых Preview-записей. В PostgreSQL применение incremental import и полная замена расписания используют общий transaction-level advisory lock, поэтому несколько backend-процессов не изменяют Excel-расписание одновременно. Импорт также можно выполнять вручную через предусмотренные API/CLI-команды после проверки файла.
 
 При `TELEGRAM_ENABLED=true` и `NOTIFICATIONS_AUTO_SEND_ENABLED=true` bot runner запускает отдельный async-loop автоотправки. Интервал задается `AUTO_SEND_POLL_INTERVAL_SECONDS`. Loop не блокирует aiogram polling. Уведомление перед отправкой атомарно захватывается переходом `planned -> processing`, поэтому второй runner не должен отправить тот же notification повторно. После успешной отправки статус становится `sent`, сохраняются `telegram_chat_id`, `telegram_message_id`, `sent_at`.
 
@@ -745,6 +754,8 @@ APP_ENV=development
 DEV_COMMANDS_ENABLED=false
 DATABASE_URL=postgresql+psycopg://ppr_user:ppr_password@localhost:5432/ppr_db
 SCHEDULE_XLSX_PATH=./data/schedule.xlsx
+SCHEDULE_AUTO_IMPORT_ENABLED=false
+SCHEDULE_AUTO_IMPORT_INTERVAL_MINUTES=10
 DEFAULT_TIMEZONE=Europe/Moscow
 ```
 

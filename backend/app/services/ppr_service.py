@@ -1,5 +1,8 @@
+import hashlib
+import re
 from datetime import date, datetime, time
-from sqlalchemy import update
+
+from sqlalchemy import text, update
 from sqlalchemy.orm import Session, joinedload
 from app.db.models import AuditLog, PprEvent, PprNotification
 from app.services.statuses import (
@@ -17,6 +20,87 @@ from app.services.user_service import ROLE_ADMIN, user_display
 
 class WorkflowConflict(ValueError):
     pass
+
+
+class PprDuplicateError(ValueError):
+    def __init__(self, event_id: int):
+        self.event_id = event_id
+        super().__init__(f"Найдена потенциально дублирующая ППР: ID {event_id}")
+
+
+def normalize_duplicate_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+
+def find_active_ppr_duplicate(
+    db: Session,
+    *,
+    title: str,
+    project: str,
+    event_date: date,
+    start_time: time,
+) -> PprEvent | None:
+    normalized_title = normalize_duplicate_text(title)
+    normalized_project = normalize_duplicate_text(project)
+    candidates = (
+        db.query(PprEvent)
+        .filter(
+            PprEvent.is_active.is_(True),
+            PprEvent.date == event_date,
+            PprEvent.start_time == start_time,
+        )
+        .order_by(PprEvent.id.asc())
+        .all()
+    )
+    for event in candidates:
+        if (
+            normalize_duplicate_text(event.title) == normalized_title
+            and normalize_duplicate_text(event.project) == normalized_project
+        ):
+            return event
+    return None
+
+
+def _create_duplicate_lock_key(
+    *,
+    title: str,
+    project: str,
+    event_date: date,
+    start_time: time,
+) -> int:
+    identity = "\x1f".join(
+        [
+            normalize_duplicate_text(title),
+            normalize_duplicate_text(project),
+            event_date.isoformat(),
+            start_time.isoformat(),
+        ]
+    )
+    return int.from_bytes(
+        hashlib.sha256(identity.encode("utf-8")).digest()[:8],
+        byteorder="big",
+        signed=True,
+    )
+
+
+def _acquire_create_duplicate_lock(
+    db: Session,
+    *,
+    title: str,
+    project: str,
+    event_date: date,
+    start_time: time,
+) -> None:
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    lock_key = _create_duplicate_lock_key(
+        title=title,
+        project=project,
+        event_date=event_date,
+        start_time=start_time,
+    )
+    db.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
 
 
 def user_display_name(user_id: str, username: str | None, first_name: str | None = None, last_name: str | None = None) -> str:
@@ -224,24 +308,58 @@ def create_ppr_event(db: Session, payload: dict, user) -> PprEvent:
     if not title:
         raise ValueError("title is required")
 
-    now = datetime.utcnow()
-    event = PprEvent(
-        external_id=make_manual_external_id(),
-        title=title,
-        is_active=True,
-        ppr_status=PPR_STATUS_SCHEDULED,
-        is_manually_edited=True,
-        manual_updated_at=now,
-        updated_at=now,
-    )
-    db.add(event)
-    db.flush()
-    apply_event_payload(event, {**payload, "title": title})
-    add_event_audit(db, event, "created", user, "ППР создана вручную")
-    sync_start_notification(db, event, user)
-    db.commit()
-    db.refresh(event)
-    return get_event_card(db, event.id)
+    event_date = parse_date_input(payload.get("date"))
+    start_time = parse_time_input(payload.get("start_time"))
+    project = (payload.get("project") or "").strip()
+    try:
+        if event_date is not None and start_time is not None and project:
+            _acquire_create_duplicate_lock(
+                db,
+                title=title,
+                project=project,
+                event_date=event_date,
+                start_time=start_time,
+            )
+            duplicate = find_active_ppr_duplicate(
+                db,
+                title=title,
+                project=project,
+                event_date=event_date,
+                start_time=start_time,
+            )
+            if duplicate:
+                raise PprDuplicateError(duplicate.id)
+
+        now = datetime.utcnow()
+        event = PprEvent(
+            external_id=make_manual_external_id(),
+            title=title,
+            is_active=True,
+            ppr_status=PPR_STATUS_SCHEDULED,
+            is_manually_edited=True,
+            manual_updated_at=now,
+            updated_at=now,
+        )
+        db.add(event)
+        db.flush()
+        apply_event_payload(
+            event,
+            {
+                **payload,
+                "title": title,
+                "project": project or payload.get("project"),
+                "date": event_date,
+                "start_time": start_time,
+            },
+        )
+        add_event_audit(db, event, "created", user, "ППР создана вручную")
+        sync_start_notification(db, event, user)
+        db.commit()
+        db.refresh(event)
+        return get_event_card(db, event.id)
+    except Exception:
+        db.rollback()
+        raise
 
 
 def update_ppr_event(db: Session, event: PprEvent, payload: dict, user) -> PprEvent:

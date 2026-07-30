@@ -103,15 +103,31 @@ def cell(row, header_map: dict[str, int], key: str) -> Any:
 async def import_excel(db: Session, path: str | Path, sheet_name: str = "ППР_для_бота") -> ImportResult:
     from types import SimpleNamespace
 
-    from app.excel.import_service import ImportRepeatedFile, apply_saved_import_preview, read_file_bytes, save_import_preview
+    from app.excel.import_service import (
+        ImportRepeatedFile,
+        ImportPreviewError,
+        apply_saved_import_preview,
+        build_import_preview,
+        read_file_bytes,
+        save_import_preview,
+    )
 
     filename, content = read_file_bytes(path)
     user = SimpleNamespace(telegram_id="system", username="system", full_name="system")
-    preview = save_import_preview(db, content, filename, "safe", user)
+    preview = build_import_preview(db, content, filename, "safe")
     if preview.get("warnings"):
+        # Polling the same unchanged file must be a no-op without adding a new
+        # preview row on every scheduler interval.
         summary = preview["summary"]
         details = preview["details"]
+    elif preview["summary"].get("errors_count"):
+        # Invalid scheduled input is reported but not persisted as a fresh
+        # Preview on every poll.
+        raise ImportPreviewError(
+            "Preview contains invalid, duplicate, or ambiguous rows. Fix the Excel file."
+        )
     else:
+        preview = save_import_preview(db, content, filename, "safe", user)
         try:
             applied = await apply_saved_import_preview(db, preview["preview_id"], content, "safe", user)
             summary = applied["summary"]

@@ -11,7 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 from openpyxl import load_workbook
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from app.db.models import AuditLog, ImportRun, PprEvent, PprNotification
@@ -63,6 +63,10 @@ NOTIFICATION_DISABLE_MISSING_DATE = "disable_missing_date"
 NOTIFICATION_DISABLE_NOTIFY_FALSE = "disable_notify_false"
 NOTIFICATION_SKIP = "skip"
 
+# Shared with full schedule replacement so incremental apply and replacement
+# cannot mutate the Excel-managed schedule concurrently.
+SCHEDULE_MUTATION_LOCK_KEY = 8_830_914_217
+
 
 class ImportPreviewError(ValueError):
     pass
@@ -82,6 +86,17 @@ class ImportForceConfirmationRequired(ImportPreviewError):
 
 class ImportRepeatedFile(ImportPreviewError):
     pass
+
+
+def acquire_import_apply_lock(db: Session) -> None:
+    """Serialize Excel apply transactions across PostgreSQL workers."""
+    bind = db.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": SCHEDULE_MUTATION_LOCK_KEY},
+    )
 
 
 @dataclass
@@ -316,10 +331,11 @@ def parse_excel_content(content: bytes, sheet_name: str = "ППР_для_бот�
 
 def find_matching_events(db: Session, row: ParsedExcelRow) -> MatchResult:
     source_key_events = db.query(PprEvent).filter(PprEvent.source_key == row.source_key).all() if row.source_key else []
-    if len(source_key_events) > 1:
-        return MatchResult(source_key_events, MATCH_METHOD_AMBIGUOUS, "source_key сопоставился с несколькими ППР")
-    if len(source_key_events) == 1:
-        return MatchResult(source_key_events, MATCH_METHOD_SOURCE_KEY, "Найдено по source_key")
+    if row.key_method != KEY_METHOD_FINGERPRINT:
+        if len(source_key_events) > 1:
+            return MatchResult(source_key_events, MATCH_METHOD_AMBIGUOUS, "source_key сопоставился с несколькими ППР")
+        if len(source_key_events) == 1:
+            return MatchResult(source_key_events, MATCH_METHOD_SOURCE_KEY, "Найдено по source_key")
 
     if row.external_id_from_excel:
         external_id_events = db.query(PprEvent).filter(PprEvent.external_id == row.external_id).all()
@@ -335,25 +351,64 @@ def find_matching_events(db: Session, row: ParsedExcelRow) -> MatchResult:
     legacy_filters.append(PprEvent.external_id == legacy_external_id)
     legacy_events = db.query(PprEvent).filter(or_(*legacy_filters)).all() if legacy_filters else []
     legacy_by_id = {event.id: event for event in legacy_events if not is_manual_event(event)}
+
+    # Full schedule replacement gives rows without explicit IDs unique
+    # replace-row:* keys so equal fingerprints can coexist. A later
+    # incremental import calculates the canonical fingerprint:* key again.
+    # Compare against every non-manual imported event, including replace-row
+    # records, or the replacement row would be treated as a new PPR.
+    if row.key_method == KEY_METHOD_FINGERPRINT:
+        fingerprint_matches = {
+            event.id: event
+            for event in source_key_events
+            if not is_manual_event(event)
+        }
+        imported_events = db.query(PprEvent).all()
+        for event in imported_events:
+            if (
+                not is_manual_event(event)
+                and event_fingerprint_source_key(event) == row.source_key
+            ):
+                fingerprint_matches[event.id] = event
+        if len(fingerprint_matches) > 1:
+            return MatchResult(
+                list(fingerprint_matches.values()),
+                MATCH_METHOD_AMBIGUOUS,
+                "fingerprint сопоставился с несколькими ППР",
+            )
+        if len(legacy_by_id) > 1:
+            return MatchResult(
+                list(legacy_by_id.values()),
+                MATCH_METHOD_AMBIGUOUS,
+                "legacy row сопоставился с несколькими ППР",
+            )
+        if len(fingerprint_matches) == 1:
+            event = next(iter(fingerprint_matches.values()))
+            if len(legacy_by_id) == 1 and event.id not in legacy_by_id:
+                return MatchResult(
+                    [event, *legacy_by_id.values()],
+                    MATCH_METHOD_AMBIGUOUS,
+                    "fingerprint и legacy row указывают на разные ППР",
+                )
+            if event.source_key == row.source_key:
+                method = MATCH_METHOD_SOURCE_KEY
+                reason = "Найдено по source_key"
+            elif event.id in legacy_by_id:
+                method = MATCH_METHOD_LEGACY_ROW
+                reason = "Найдено по legacy row и подтверждено fingerprint; source_key можно обновить"
+            else:
+                method = MATCH_METHOD_FINGERPRINT
+                reason = "Найдено по уникальному fingerprint; source_key можно обновить"
+            return MatchResult(
+                [event],
+                method,
+                reason,
+            )
+
     if len(legacy_by_id) > 1:
         return MatchResult(list(legacy_by_id.values()), MATCH_METHOD_AMBIGUOUS, "legacy row сопоставился с несколькими ППР")
     if len(legacy_by_id) == 1:
         return MatchResult(list(legacy_by_id.values()), MATCH_METHOD_LEGACY_ROW, "Найдено по legacy row; source_key можно обновить")
-
-    if row.key_method == KEY_METHOD_FINGERPRINT:
-        fingerprint_matches: dict[int, PprEvent] = {}
-        imported_events = db.query(PprEvent).filter(PprEvent.external_id.notlike("MANUAL-%")).all()
-        for event in imported_events:
-            if event.source_key == row.source_key:
-                fingerprint_matches[event.id] = event
-            elif event.source_key is None and event_fingerprint_source_key(event) == row.source_key:
-                fingerprint_matches[event.id] = event
-            elif is_legacy_row_source_key(event.source_key) and event_fingerprint_source_key(event) == row.source_key:
-                fingerprint_matches[event.id] = event
-        if len(fingerprint_matches) > 1:
-            return MatchResult(list(fingerprint_matches.values()), MATCH_METHOD_AMBIGUOUS, "fingerprint сопоставился с несколькими ППР")
-        if len(fingerprint_matches) == 1:
-            return MatchResult(list(fingerprint_matches.values()), MATCH_METHOD_FINGERPRINT, "Найдено по уникальному fingerprint; source_key можно обновить")
 
     return MatchResult([], MATCH_METHOD_NONE, "Совпадений в БД нет")
 
@@ -626,7 +681,12 @@ def build_import_preview(db: Session, content: bytes, filename: str, mode: str =
             continue
 
         changes = compare_event_values(event, row.values)
-        only_source_key_migration = set(changes) == {"external_id", "source_key", "source_row"} or set(changes) == {"source_key"} or set(changes) == {"source_key", "source_row"}
+        only_source_key_migration = frozenset(changes) in {
+            frozenset({"external_id", "source_key", "source_row"}),
+            frozenset({"external_id", "source_key"}),
+            frozenset({"source_key"}),
+            frozenset({"source_key", "source_row"}),
+        }
         if mode == IMPORT_MODE_NEW_ONLY:
             details.append(row_detail(row, event, ACTION_UNCHANGED, "new_only: существующая ППР не меняется", {}, mode, match.method, "high"))
         elif event.is_manually_edited and mode == IMPORT_MODE_SAFE:
@@ -776,23 +836,30 @@ async def apply_saved_import_preview(
     confirm_force: bool = False,
 ) -> dict:
     mode = validate_mode(mode)
-    run = db.query(ImportRun).filter(ImportRun.preview_id == preview_id).one_or_none()
-    if run is None or run.status != IMPORT_STATUS_PREVIEW or not run.summary:
-        raise ImportPreviewNotFound("Preview not found. Run /api/import/excel/preview first.")
-    if run.mode != mode:
-        raise ImportPreviewError(f"Apply mode must match preview mode: {run.mode}")
+    try:
+        acquire_import_apply_lock(db)
+        run = db.query(ImportRun).filter(ImportRun.preview_id == preview_id).one_or_none()
+        if run is None or run.status != IMPORT_STATUS_PREVIEW or not run.summary:
+            raise ImportPreviewNotFound("Preview not found. Run /api/import/excel/preview first.")
+        if run.mode != mode:
+            raise ImportPreviewError(f"Apply mode must match preview mode: {run.mode}")
 
-    current_hash = file_sha256(content)
-    if current_hash != run.file_hash:
-        raise ImportFileChanged("Excel file changed after preview. Run preview again.")
-    if mode == IMPORT_MODE_FORCE and not confirm_force:
-        raise ImportForceConfirmationRequired("Force import requires confirm_force=true.")
-    if mode != IMPORT_MODE_FORCE and duplicate_successful_import_exists(db, run.file_hash, exclude_id=run.id):
-        raise ImportRepeatedFile("This file was already imported. Use force mode with explicit confirmation to reapply.")
+        current_hash = file_sha256(content)
+        if current_hash != run.file_hash:
+            raise ImportFileChanged("Excel file changed after preview. Run preview again.")
+        if mode == IMPORT_MODE_FORCE and not confirm_force:
+            raise ImportForceConfirmationRequired("Force import requires confirm_force=true.")
+        if mode != IMPORT_MODE_FORCE and duplicate_successful_import_exists(db, run.file_hash, exclude_id=run.id):
+            raise ImportRepeatedFile("This file was already imported. Use force mode with explicit confirmation to reapply.")
 
-    preview = run.summary
-    if any(detail.get("action") in {ACTION_INVALID, ACTION_DUPLICATE, ACTION_AMBIGUOUS} for detail in preview.get("details", [])):
-        raise ImportPreviewError("Preview contains invalid, duplicate, or ambiguous rows. Fix the Excel file and run preview again.")
+        preview = run.summary
+        if any(detail.get("action") in {ACTION_INVALID, ACTION_DUPLICATE, ACTION_AMBIGUOUS} for detail in preview.get("details", [])):
+            raise ImportPreviewError("Preview contains invalid, duplicate, or ambiguous rows. Fix the Excel file and run preview again.")
+    except Exception:
+        # Release transaction-level advisory locks immediately on validation,
+        # lookup, or database errors before any schedule mutation starts.
+        db.rollback()
+        raise
 
     applied = {
         "created": 0,

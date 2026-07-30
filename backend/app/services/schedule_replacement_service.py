@@ -28,6 +28,7 @@ from app.db.models import AppUser, AuditLog, ImportRun, PprEvent, PprNotificatio
 from app.excel.import_service import (
     KEY_METHOD_FINGERPRINT,
     ParsedExcelRow,
+    SCHEDULE_MUTATION_LOCK_KEY,
     automatic_external_id,
     build_fingerprint_source_key,
     file_sha256,
@@ -47,7 +48,7 @@ from app.services.telegram_sender import scheduler_status
 
 
 REPLACE_CONFIRMATION = "REPLACE_SCHEDULE"
-ADVISORY_LOCK_KEY = 8_830_914_217
+ADVISORY_LOCK_KEY = SCHEDULE_MUTATION_LOCK_KEY
 REQUIRED_SCHEDULE_COLUMNS = ("title", "date", "start_time")
 TRUE_FALSE_VALUES = {"да", "yes", "y", "true", "1", "истина", "нет", "no", "n", "false", "0", "ложь"}
 

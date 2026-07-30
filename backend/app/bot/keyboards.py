@@ -56,3 +56,20 @@ def notification_keyboard(notification_id: int, ppr_status: str) -> InlineKeyboa
     if not buttons:
         return None
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def create_ppr_preview_keyboard(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Создать",
+                    callback_data=f"createppr:confirm:{token}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"createppr:cancel:{token}",
+                ),
+            ]
+        ]
+    )

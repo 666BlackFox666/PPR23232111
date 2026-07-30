@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from datetime import date, datetime, time, timedelta
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openpyxl import Workbook
 from sqlalchemy import create_engine
@@ -25,10 +26,13 @@ from app.excel.import_service import (
     ImportPreviewError,
     ImportPreviewNotFound,
     ImportRepeatedFile,
+    SCHEDULE_MUTATION_LOCK_KEY,
+    acquire_import_apply_lock,
     apply_saved_import_preview,
     build_import_preview,
     save_import_preview,
 )
+from app.excel.importer import import_excel
 from app.excel.source_key_backfill import apply_backfill_plan, build_backfill_plan
 from app.services.statuses import NOTIFICATION_STATUS_PLANNED
 from app.services.user_service import ROLE_ADMIN, ROLE_CHECKER
@@ -125,6 +129,79 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(db.query(PprEvent).count(), 1)
             self.assertEqual(db.query(PprNotification).count(), 1)
 
+    def test_two_previews_created_before_apply_cannot_apply_same_file_twice(self):
+        content = workbook_bytes([{"id": "A-CONCURRENT", "date": self.tomorrow, "title": "Concurrent-like"}])
+        with self.SessionLocal() as db:
+            first = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
+            second = save_import_preview(db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin)
+
+            asyncio.run(
+                apply_saved_import_preview(
+                    db,
+                    first["preview_id"],
+                    content,
+                    IMPORT_MODE_SAFE,
+                    self.admin,
+                )
+            )
+            with self.assertRaises(ImportRepeatedFile):
+                asyncio.run(
+                    apply_saved_import_preview(
+                        db,
+                        second["preview_id"],
+                        content,
+                        IMPORT_MODE_SAFE,
+                        self.admin,
+                    )
+                )
+
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprNotification).count(), 1)
+
+    def test_periodic_import_of_unchanged_file_does_not_accumulate_previews(self):
+        content = workbook_bytes(
+            [{"id": "A-POLL", "date": self.tomorrow, "title": "Polling"}]
+        )
+        handle = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        handle.close()
+        schedule_path = Path(handle.name)
+        schedule_path.write_bytes(content)
+        try:
+            with self.SessionLocal() as db:
+                asyncio.run(import_excel(db, schedule_path))
+                self.assertEqual(db.query(ImportRun).count(), 1)
+
+                asyncio.run(import_excel(db, schedule_path))
+
+                self.assertEqual(db.query(ImportRun).count(), 1)
+                self.assertEqual(db.query(PprEvent).count(), 1)
+                self.assertEqual(db.query(PprNotification).count(), 1)
+        finally:
+            schedule_path.unlink(missing_ok=True)
+
+    def test_periodic_invalid_file_does_not_accumulate_previews(self):
+        content = workbook_bytes(
+            [
+                {"id": "A-INVALID", "date": self.tomorrow, "title": "First"},
+                {"id": "A-INVALID", "date": self.tomorrow, "title": "Second"},
+            ]
+        )
+        handle = tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        handle.close()
+        schedule_path = Path(handle.name)
+        schedule_path.write_bytes(content)
+        try:
+            with self.SessionLocal() as db:
+                for _ in range(2):
+                    with self.assertRaises(ImportPreviewError):
+                        asyncio.run(import_excel(db, schedule_path))
+
+                self.assertEqual(db.query(ImportRun).count(), 0)
+                self.assertEqual(db.query(PprEvent).count(), 0)
+                self.assertEqual(db.query(PprNotification).count(), 0)
+        finally:
+            schedule_path.unlink(missing_ok=True)
+
     def test_safe_does_not_overwrite_manual_edit(self):
         first = workbook_bytes([{"id": "A-2", "date": self.tomorrow, "title": "Original"}])
         changed = workbook_bytes([{"id": "A-2", "date": self.tomorrow + timedelta(days=5), "title": "From Excel"}])
@@ -142,6 +219,37 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             event = db.query(PprEvent).one()
             self.assertEqual(event.title, "Manual")
             self.assertEqual(event.date, self.tomorrow + timedelta(days=2))
+
+    def test_safe_keeps_manually_edited_no_id_event_bound_to_its_source_key(self):
+        content = workbook_bytes(
+            [{"date": self.tomorrow, "title": "Original no-ID event"}]
+        )
+        changed = workbook_bytes(
+            [
+                {
+                    "date": self.tomorrow + timedelta(days=1),
+                    "title": "Original no-ID event",
+                }
+            ]
+        )
+        with self.SessionLocal() as db:
+            self.preview_and_apply(db, content)
+            event = db.query(PprEvent).one()
+            event.title = "Manually changed title"
+            event.is_manually_edited = True
+            db.commit()
+
+            preview = build_import_preview(
+                db, changed, "schedule.xlsx", IMPORT_MODE_SAFE
+            )
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["action"], "skip_manual")
+            self.assertEqual(detail["match_method"], "source_key")
+            self.preview_and_apply(db, changed)
+
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprEvent).one().title, "Manually changed title")
+            self.assertEqual(db.query(PprEvent).one().date, self.tomorrow)
 
     def test_force_overwrites_manual_edit(self):
         first = workbook_bytes([{"id": "A-3", "date": self.tomorrow, "title": "Original"}])
@@ -324,6 +432,51 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(db.query(PprEvent).count(), 1)
             self.assertEqual(db.query(PprEvent).one().date, self.tomorrow + timedelta(days=9))
 
+    def test_no_id_row_receiving_date_updates_event_and_creates_one_notification(self):
+        undated = workbook_bytes(
+            [{"date": None, "start_time": None, "title": "Date assigned later"}]
+        )
+        dated = workbook_bytes(
+            [{"date": self.tomorrow, "title": "Date assigned later"}]
+        )
+        with self.SessionLocal() as db:
+            self.preview_and_apply(db, undated)
+            self.assertEqual(db.query(PprNotification).count(), 0)
+
+            preview = build_import_preview(db, dated, "schedule.xlsx", IMPORT_MODE_SAFE)
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["action"], "update")
+            self.assertEqual(detail["match_method"], "source_key")
+            self.preview_and_apply(db, dated)
+
+            self.assertEqual(db.query(PprEvent).count(), 1)
+            self.assertEqual(db.query(PprNotification).count(), 1)
+            self.assertEqual(db.query(PprEvent).one().date, self.tomorrow)
+
+    def test_same_fingerprint_on_different_dates_is_blocked_not_merged(self):
+        content = workbook_bytes(
+            [
+                {"date": self.tomorrow, "title": "Same text"},
+                {"date": self.tomorrow + timedelta(days=1), "title": "Same text"},
+            ]
+        )
+        with self.SessionLocal() as db:
+            preview = save_import_preview(
+                db, content, "schedule.xlsx", IMPORT_MODE_SAFE, self.admin
+            )
+            self.assertEqual(preview["summary"]["duplicate_rows"], 2)
+            with self.assertRaises(ImportPreviewError):
+                asyncio.run(
+                    apply_saved_import_preview(
+                        db,
+                        preview["preview_id"],
+                        content,
+                        IMPORT_MODE_SAFE,
+                        self.admin,
+                    )
+                )
+            self.assertEqual(db.query(PprEvent).count(), 0)
+
     def test_title_change_without_id_is_not_silently_matched(self):
         first = workbook_bytes([{"date": self.tomorrow, "title": "Original No ID Title"}])
         renamed = workbook_bytes([{"date": self.tomorrow, "title": "Renamed No ID Title"}])
@@ -395,6 +548,85 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             self.assertEqual(db.query(PprNotification).count(), 2)
             self.assertTrue(all(event.source_key.startswith("fingerprint:") for event in events))
             self.assertTrue(all(event.external_id.startswith("AUTO-") for event in events))
+
+    def test_fingerprint_and_legacy_row_pointing_to_different_events_is_ambiguous(self):
+        content = workbook_bytes(
+            [{"date": self.tomorrow, "title": "Fingerprint target"}]
+        )
+        with self.SessionLocal() as db:
+            fingerprint_key = build_import_preview(
+                db, content, "schedule.xlsx", IMPORT_MODE_SAFE
+            )["details"][0]["source_key"]
+            db.add_all(
+                [
+                    PprEvent(
+                        external_id="ROW-2",
+                        source_key="row:2",
+                        title="Different legacy event",
+                        project="Project",
+                        activities="Work",
+                        date=self.tomorrow,
+                        start_time=time(8, 0),
+                    ),
+                    PprEvent(
+                        external_id="AUTO-FINGERPRINT-TARGET",
+                        source_key="replace-row:ППР_для_бота:50",
+                        title="Fingerprint target",
+                        project="Project",
+                        activities="Work",
+                        date=self.tomorrow + timedelta(days=3),
+                        start_time=time(8, 0),
+                    ),
+                ]
+            )
+            db.commit()
+
+            preview = build_import_preview(
+                db, content, "schedule.xlsx", IMPORT_MODE_SAFE
+            )
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["source_key"], fingerprint_key)
+            self.assertEqual(detail["action"], "ambiguous")
+            self.assertIn("разные ППР", detail["reason"])
+
+    def test_exact_fingerprint_key_and_replace_row_match_on_different_events_is_ambiguous(self):
+        content = workbook_bytes(
+            [{"date": self.tomorrow, "title": "Exact key conflict"}]
+        )
+        with self.SessionLocal() as db:
+            fingerprint_key = build_import_preview(
+                db, content, "schedule.xlsx", IMPORT_MODE_SAFE
+            )["details"][0]["source_key"]
+            db.add_all(
+                [
+                    PprEvent(
+                        external_id="AUTO-EXACT-KEY",
+                        source_key=fingerprint_key,
+                        title="Previously changed title",
+                        project="Project",
+                        activities="Work",
+                        date=self.tomorrow,
+                        start_time=time(8, 0),
+                    ),
+                    PprEvent(
+                        external_id="AUTO-REPLACE-ROW",
+                        source_key="replace-row:ППР_для_бота:75",
+                        title="Exact key conflict",
+                        project="Project",
+                        activities="Work",
+                        date=self.tomorrow + timedelta(days=2),
+                        start_time=time(8, 0),
+                    ),
+                ]
+            )
+            db.commit()
+
+            preview = build_import_preview(
+                db, content, "schedule.xlsx", IMPORT_MODE_SAFE
+            )
+            detail = next(item for item in preview["details"] if item["excel_row_number"])
+            self.assertEqual(detail["action"], "ambiguous")
+            self.assertEqual(detail["match_method"], "ambiguous")
 
     def test_manual_event_is_not_matched_or_overwritten_by_fingerprint_import(self):
         content = workbook_bytes([{"date": self.tomorrow, "title": "Manual Boundary"}])
@@ -583,6 +815,43 @@ class ExcelImportPreviewTestCase(unittest.TestCase):
             db.refresh(event)
             self.assertEqual(event.outlook_link, "https://outlook.example/existing")
             find_link.assert_not_awaited()
+
+
+class ExcelImportAdvisoryLockTests(unittest.TestCase):
+    @staticmethod
+    def fake_db(dialect_name: str) -> MagicMock:
+        db = MagicMock()
+        db.get_bind.return_value = SimpleNamespace(
+            dialect=SimpleNamespace(name=dialect_name)
+        )
+        return db
+
+    def test_postgresql_uses_transaction_level_schedule_mutation_lock(self):
+        db = self.fake_db("postgresql")
+
+        acquire_import_apply_lock(db)
+
+        db.execute.assert_called_once()
+        statement, params = db.execute.call_args.args
+        self.assertIn("pg_advisory_xact_lock", str(statement))
+        self.assertNotIn("pg_advisory_lock(", str(statement))
+        self.assertEqual(params, {"lock_key": SCHEDULE_MUTATION_LOCK_KEY})
+        self.assertGreaterEqual(SCHEDULE_MUTATION_LOCK_KEY, -(2**63))
+        self.assertLessEqual(SCHEDULE_MUTATION_LOCK_KEY, 2**63 - 1)
+
+    def test_non_postgresql_dialect_does_not_execute_lock_sql(self):
+        db = self.fake_db("sqlite")
+
+        acquire_import_apply_lock(db)
+
+        db.execute.assert_not_called()
+
+    def test_postgresql_lock_error_is_not_masked(self):
+        db = self.fake_db("postgresql")
+        db.execute.side_effect = RuntimeError("database unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "database unavailable"):
+            acquire_import_apply_lock(db)
 
 
 class ExcelImportApiAuthTestCase(unittest.TestCase):
