@@ -27,6 +27,11 @@ export class ApiError extends Error {
 
 export type AuthMode = 'telegram' | 'dev' | 'none'
 
+export interface PprExportFile {
+  blob: Blob
+  filename: string
+}
+
 export function getTelegramInitData() {
   return window.Telegram?.WebApp?.initData || ''
 }
@@ -94,6 +99,40 @@ async function requestForm<T>(url: string, form: FormData): Promise<T> {
     throw new ApiError(response.status, detail)
   }
   return response.json()
+}
+
+export function filenameFromContentDisposition(value: string | null) {
+  if (!value) return 'PPR_export.xlsx'
+  const encoded = value.match(/filename\*\s*=\s*UTF-8''([^;]+)/i)?.[1]
+  const quoted = value.match(/filename\s*=\s*"([^"]+)"/i)?.[1]
+  const plain = value.match(/filename\s*=\s*([^;]+)/i)?.[1]
+  let filename = encoded ? decodeURIComponent(encoded.trim()) : (quoted || plain || '').trim()
+  filename = filename.split(/[\\/]/).pop()?.replace(/[\u0000-\u001f\u007f]/g, '') || ''
+  return filename.toLowerCase().endsWith('.xlsx') ? filename : 'PPR_export.xlsx'
+}
+
+async function requestPprExport(): Promise<PprExportFile> {
+  const response = await fetch('/api/export/ppr.xlsx', {
+    method: 'GET',
+    headers: {
+      ...authHeaders()
+    }
+  })
+  if (!response.ok) {
+    const text = await response.text()
+    let detail = text
+    try {
+      const payload = JSON.parse(text)
+      detail = payload.detail || text
+    } catch {
+      detail = text
+    }
+    throw new ApiError(response.status, detail)
+  }
+  return {
+    blob: await response.blob(),
+    filename: filenameFromContentDisposition(response.headers.get('Content-Disposition'))
+  }
 }
 
 function importForm(file: File | null, mode: ImportMode, previewId?: string, confirmForce = false) {
@@ -165,5 +204,6 @@ export const api = {
   importApply: (file: File | null, mode: ImportMode, previewId: string, confirmForce: boolean) => requestForm<ImportPreviewResponse>(
     '/api/import/excel/apply',
     importForm(file, mode, previewId, confirmForce)
-  )
+  ),
+  exportPpr: requestPprExport
 }

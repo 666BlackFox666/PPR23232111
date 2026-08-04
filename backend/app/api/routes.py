@@ -1,11 +1,11 @@
-from datetime import date
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from datetime import date, timezone
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import get_settings
 from app.db.session import get_db
-from app.db.models import AppUser, PprEvent, PprNotification
+from app.db.models import AppUser, AuditLog, PprEvent, PprNotification
 from app.excel.importer import import_excel
 from app.excel.import_service import (
     ImportFileChanged,
@@ -25,6 +25,7 @@ from app.services.outlook_graph import (
     outlook_integration_configured,
     sync_notification_outlook_link,
 )
+from app.services.ppr_excel_export import XLSX_MEDIA_TYPE, build_ppr_excel_export
 from app.services.ppr_service import (
     WorkflowConflict,
     add_comment,
@@ -164,6 +165,38 @@ async def import_excel_apply_endpoint(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ImportPreviewError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/api/export/ppr.xlsx")
+def export_ppr_excel(
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_roles(ROLE_ADMIN)),
+):
+    export = build_ppr_excel_export(db, user)
+    generated_at_utc = export.generated_at.astimezone(timezone.utc).replace(tzinfo=None)
+    db.add(
+        AuditLog(
+            action="ppr_excel_export",
+            user_id=user.telegram_id,
+            user_name=user_display(user),
+            comment=(
+                f"app_user_id={user.id}; telegram_id={user.telegram_id}; "
+                f"exported_count={export.event_count}; generated_at={export.generated_at.isoformat()}; "
+                f"filename={export.filename}"
+            ),
+            created_at=generated_at_utc,
+        )
+    )
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return Response(
+        content=export.content,
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{export.filename}"'},
+    )
 
 
 @router.get("/api/ppr/today")

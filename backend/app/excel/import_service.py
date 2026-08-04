@@ -462,9 +462,28 @@ def notification_preview(event: PprEvent | None, values: dict[str, Any], action:
         return NOTIFICATION_SKIP, "Уведомление не меняется для этой строки"
     if action == ACTION_UNCHANGED and mode == IMPORT_MODE_NEW_ONLY:
         return NOTIFICATION_SKIP, "new_only не меняет существующие ППР"
+    if action == ACTION_UNCHANGED:
+        return NOTIFICATION_SKIP, "Неизмененная ППР не требует синхронизации уведомления"
 
     scheduled_at = combine_datetime(values.get("date"), values.get("start_time"))
     notif = first_start_notification(event)
+
+    if notif and notif.status in {"sent", "failed", "processing", "delivery_unknown"}:
+        return NOTIFICATION_SKIP, f"Статус уведомления {notif.status} сохраняется; автоматическая переотправка запрещена"
+
+    notification_controls_changed = bool(
+        event
+        and any(
+            (
+                event.date != values.get("date"),
+                event.start_time != values.get("start_time"),
+                event.is_active != values.get("is_active", True),
+                event.notify_start != values.get("notify_start", True),
+            )
+        )
+    )
+    if notif and notif.status in {NOTIFICATION_STATUS_SKIPPED, NOTIFICATION_STATUS_CANCELLED} and not notification_controls_changed:
+        return NOTIFICATION_SKIP, f"Статус уведомления {notif.status} сохраняется: параметры уведомления не изменены"
 
     if not values.get("date"):
         if notif:
@@ -679,6 +698,18 @@ def build_import_preview(db: Session, content: bytes, filename: str, mode: str =
         if event is None:
             details.append(row_detail(row, None, ACTION_CREATE, "Новая ППР из Excel", {}, mode, MATCH_METHOD_NONE, "none"))
             continue
+
+        # An editable workbook can carry the stable external ID even when the
+        # original row used another source-key strategy.  When that ID matches
+        # an existing row, keep its internal source identity:
+        # changing source_key merely because the editable file has an ID would
+        # turn an unchanged export into a migration.  A blank source-row cell
+        # likewise means "keep the current value" for an exact ID match.
+        if row.external_id_from_excel == event.external_id:
+            if match.method == MATCH_METHOD_EXTERNAL_ID:
+                row.values["source_key"] = event.source_key
+            if row.source_value is None:
+                row.values["source_row"] = event.source_row
 
         changes = compare_event_values(event, row.values)
         only_source_key_migration = frozenset(changes) in {

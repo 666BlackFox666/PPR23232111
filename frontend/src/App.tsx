@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, getAuthMode } from './api'
+import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport'
 import type { ReactNode } from 'react'
 import type { AppUser, DashboardSummary, ImportMode, ImportPreviewDetail, ImportPreviewResponse, PprCard, PprListQuery, PprNotification, PprSort, UserRole } from './types'
 
@@ -719,7 +720,7 @@ function changedFieldsText(item: ImportPreviewDetail) {
   return entries.map(([field, value]) => `${field}: ${value.old ?? 'пусто'} -> ${value.new ?? 'пусто'}`).join('; ')
 }
 
-function ImportExcelView() {
+function ImportExcelView({ currentUser }: { currentUser: AppUser }) {
   const [file, setFile] = useState<File | null>(null)
   const [mode, setMode] = useState<ImportMode>('safe')
   const [preview, setPreview] = useState<ImportPreviewResponse | null>(null)
@@ -727,6 +728,8 @@ function ImportExcelView() {
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [exportLoading, setExportLoading] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   const filteredDetails = useMemo(
     () => (preview?.details || []).filter(item => detailMatchesFilter(item, filter)),
@@ -772,8 +775,29 @@ function ImportExcelView() {
     }
   }
 
+  async function downloadExport() {
+    await runPprExportDownload(
+      api.exportPpr,
+      savePprExportFile,
+      setExportLoading,
+      setExportError
+    )
+  }
+
   return (
     <section className="import-section">
+      {canShowPprExport(currentUser) && (
+        <article className="card import-panel export-panel">
+          <h2>Экспорт базы ППР</h2>
+          <p className="muted">Скачайте текущую базу, внесите массовые изменения в Excel, затем загрузите файл ниже через Preview → Apply.</p>
+          <div className="actions form-actions">
+            <button className="primary-button" onClick={downloadExport} disabled={exportLoading}>
+              {exportLoading ? 'Формирование файла...' : '📥 Скачать текущую базу ППР'}
+            </button>
+          </div>
+          {exportError && <Notice tone="error">{exportError}</Notice>}
+        </article>
+      )}
       <article className="card import-panel">
         <h2>Импорт Excel</h2>
         <div className="form-grid">
@@ -1477,7 +1501,7 @@ export default function App() {
       ) : tab === 'deliveryErrors' ? (
         <DeliveryErrorsView onCountChange={count => setCounts(value => ({ ...value, deliveryErrors: count }))} />
       ) : tab === 'importExcel' ? (
-        <ImportExcelView />
+        <ImportExcelView currentUser={currentUser} />
       ) : (
         <>
           {tab === 'missingDate' && (

@@ -692,6 +692,11 @@ textarea {
   line-height: 1.25;
 }
 
+.export-panel .muted {
+  margin: 0;
+  line-height: 1.5;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
