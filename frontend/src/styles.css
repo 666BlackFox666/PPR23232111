@@ -703,6 +703,16 @@ textarea {
   gap: 8px;
 }
 
+.match-method-summary {
+  margin-top: 14px;
+}
+
+.match-method-summary h3 {
+  margin: 0 0 8px;
+  color: #39465a;
+  font-size: 14px;
+}
+
 .summary-item {
   border: 1px solid #e5eaf1;
   border-radius: 8px;

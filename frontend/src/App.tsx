@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, getAuthMode } from './api'
+import { matchByMethodEntries, summaryGridEntries } from './importSummary'
 import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport'
 import type { ReactNode } from 'react'
 import type { AppUser, DashboardSummary, ImportMode, ImportPreviewDetail, ImportPreviewResponse, PprCard, PprListQuery, PprNotification, PprSort, UserRole } from './types'
@@ -735,6 +736,14 @@ function ImportExcelView({ currentUser }: { currentUser: AppUser }) {
     () => (preview?.details || []).filter(item => detailMatchesFilter(item, filter)),
     [preview, filter]
   )
+  const summaryEntries = useMemo(
+    () => preview ? summaryGridEntries(preview.summary) : [],
+    [preview]
+  )
+  const matchMethods = useMemo(
+    () => matchByMethodEntries(preview?.summary.match_by_method),
+    [preview]
+  )
   const canApply = Boolean(preview?.preview_id && preview.summary.errors_count === 0)
 
   async function runPreview() {
@@ -851,13 +860,26 @@ function ImportExcelView({ currentUser }: { currentUser: AppUser }) {
           <article className="card import-summary">
             <h2>Summary</h2>
             <div className="summary-grid">
-              {Object.entries(preview.summary).map(([key, value]) => (
+              {summaryEntries.map(({ key, value }) => (
                 <div key={key} className="summary-item">
                   <span>{key}</span>
                   <b>{value}</b>
                 </div>
               ))}
             </div>
+            {matchMethods.length > 0 && (
+              <section className="match-method-summary" aria-label="Методы сопоставления ППР">
+                <h3>Методы сопоставления</h3>
+                <div className="summary-grid">
+                  {matchMethods.map(({ key, value }) => (
+                    <div key={key} className="summary-item">
+                      <span>{key}</span>
+                      <b>{value}</b>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
           </article>
 
           <div className="import-filters">

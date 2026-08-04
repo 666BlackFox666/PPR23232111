@@ -177,7 +177,7 @@ export interface ImportPreviewSummary {
   notifications_to_skip: number
   events_missing_from_excel: number
   errors_count: number
-  match_by_method?: Record<string, number>
+  match_by_method?: Record<string, number> | null
 }
 
 export interface ImportPreviewResponse {

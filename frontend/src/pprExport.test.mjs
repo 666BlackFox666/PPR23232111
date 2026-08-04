@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { api, filenameFromContentDisposition } from './api.ts'
+import { matchByMethodEntries, summaryGridEntries } from './importSummary.ts'
 import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport.ts'
 
 
@@ -103,4 +104,39 @@ test('Content-Disposition parser supports UTF-8 names and rejects unsafe paths',
     filenameFromContentDisposition('attachment; filename="../not-an-excel.txt"'),
     'PPR_export.xlsx'
   )
+})
+
+test('Preview summary keeps nested objects out of the React grid and renders known match methods separately', () => {
+  const previewResponse = {
+    summary: {
+      total_rows: 12,
+      updated_events: 3,
+      match_by_method: {
+        source_key: 7,
+        external_id: 2,
+        fingerprint: 1,
+        unknown_backend_key: 99
+      },
+      future_nested_summary: { should_not_render: true }
+    }
+  }
+
+  assert.deepEqual(
+    summaryGridEntries(previewResponse.summary),
+    [
+      { key: 'total_rows', value: 12 },
+      { key: 'updated_events', value: 3 }
+    ]
+  )
+  assert.deepEqual(
+    matchByMethodEntries(previewResponse.summary.match_by_method),
+    [
+      { key: 'source_key', value: 7 },
+      { key: 'external_id', value: 2 },
+      { key: 'fingerprint', value: 1 }
+    ]
+  )
+  assert.deepEqual(matchByMethodEntries(undefined), [])
+  assert.deepEqual(matchByMethodEntries(null), [])
+  assert.deepEqual(matchByMethodEntries({ unknown_backend_key: 99 }), [])
 })
