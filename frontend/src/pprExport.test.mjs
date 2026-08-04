@@ -4,6 +4,13 @@ import assert from 'node:assert/strict'
 import { api, filenameFromContentDisposition } from './api.ts'
 import { matchByMethodEntries, summaryGridEntries } from './importSummary.ts'
 import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport.ts'
+import {
+  FULLSCREEN_ERROR_MESSAGE,
+  canShowFullscreenControl,
+  fullscreenButtonLabel,
+  subscribeToFullscreenChanges,
+  toggleTelegramFullscreen
+} from './telegramFullscreen.ts'
 
 
 test('export control is visible only to an active admin', () => {
@@ -139,4 +146,62 @@ test('Preview summary keeps nested objects out of the React grid and renders kno
   assert.deepEqual(matchByMethodEntries(undefined), [])
   assert.deepEqual(matchByMethodEntries(null), [])
   assert.deepEqual(matchByMethodEntries({ unknown_backend_key: 99 }), [])
+})
+
+test('fullscreen control is visible on desktop and enters fullscreen on explicit click', async () => {
+  let requests = 0
+  const webApp = {
+    isFullscreen: false,
+    requestFullscreen: async () => { requests += 1 },
+    exitFullscreen: async () => {}
+  }
+
+  assert.equal(canShowFullscreenControl(webApp, 1024), true)
+  assert.equal(fullscreenButtonLabel(webApp.isFullscreen), 'На весь экран')
+  assert.equal(await toggleTelegramFullscreen(webApp), true)
+  assert.equal(requests, 1)
+})
+
+test('fullscreen control exits from fullscreen and synchronizes event listeners', async () => {
+  let exits = 0
+  let subscribed
+  let removed
+  const webApp = {
+    isFullscreen: true,
+    requestFullscreen: async () => {},
+    exitFullscreen: async () => { exits += 1 },
+    onEvent: (event, handler) => { subscribed = { event, handler } },
+    offEvent: (event, handler) => { removed = { event, handler } }
+  }
+  const handler = () => {}
+  const unsubscribe = subscribeToFullscreenChanges(webApp, handler)
+
+  assert.equal(fullscreenButtonLabel(webApp.isFullscreen), 'Выйти из полноэкранного режима')
+  assert.equal(await toggleTelegramFullscreen(webApp), false)
+  assert.equal(exits, 1)
+  assert.equal(subscribed.event, 'fullscreenChanged')
+  unsubscribe()
+  assert.equal(removed.event, 'fullscreenChanged')
+  assert.equal(removed.handler, handler)
+})
+
+test('fullscreen control stays hidden without API or on a small viewport', () => {
+  const unsupportedWebApp = { isFullscreen: false }
+  const supportedWebApp = {
+    isFullscreen: false,
+    requestFullscreen: () => {},
+    exitFullscreen: () => {}
+  }
+  assert.equal(canShowFullscreenControl(unsupportedWebApp, 1280), false)
+  assert.equal(canShowFullscreenControl(supportedWebApp, 767), false)
+})
+
+test('fullscreen request errors are recoverable and use a user-facing message', async () => {
+  const webApp = {
+    isFullscreen: false,
+    requestFullscreen: async () => { throw new Error('denied') },
+    exitFullscreen: async () => {}
+  }
+  await assert.rejects(toggleTelegramFullscreen(webApp), /denied/)
+  assert.equal(FULLSCREEN_ERROR_MESSAGE, 'Не удалось изменить полноэкранный режим.')
 })

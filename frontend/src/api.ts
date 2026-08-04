@@ -1,20 +1,5 @@
 import type { AppUser, Capabilities, DashboardSummary, ImportMode, ImportPreviewResponse, NotificationListResponse, PprCard, PprListQuery, PprListResponse, PprNotification, UserCreatePayload, UserUpdatePayload } from './types'
 
-declare global {
-  interface Window {
-    Telegram?: {
-      WebApp?: {
-        initData?: string
-        initDataUnsafe?: {
-          start_param?: string
-        }
-        ready?: () => void
-        expand?: () => void
-      }
-    }
-  }
-}
-
 export class ApiError extends Error {
   status: number
 

@@ -2,6 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, getAuthMode } from './api'
 import { matchByMethodEntries, summaryGridEntries } from './importSummary'
 import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport'
+import {
+  FULLSCREEN_ERROR_MESSAGE,
+  canShowFullscreenControl,
+  fullscreenButtonLabel,
+  subscribeToFullscreenChanges,
+  toggleTelegramFullscreen
+} from './telegramFullscreen'
+import { getTelegramWebApp } from './telegramWebApp'
 import type { ReactNode } from 'react'
 import type { AppUser, DashboardSummary, ImportMode, ImportPreviewDetail, ImportPreviewResponse, PprCard, PprListQuery, PprNotification, PprSort, UserRole } from './types'
 
@@ -168,6 +176,56 @@ function InfoRow({ label, value }: { label: string; value?: string | null }) {
 
 function Notice({ children, tone = 'info' }: { children: ReactNode; tone?: 'info' | 'warning' | 'error' }) {
   return <div className={`notice notice-${tone}`}>{children}</div>
+}
+
+function useTelegramFullscreen() {
+  const [viewportWidth, setViewportWidth] = useState(() => typeof window === 'undefined' ? 0 : window.innerWidth)
+  const [isFullscreen, setIsFullscreen] = useState(() => Boolean(getTelegramWebApp()?.isFullscreen))
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const webApp = getTelegramWebApp()
+    const syncFullscreenState = () => setIsFullscreen(Boolean(webApp?.isFullscreen))
+    const syncViewportWidth = () => setViewportWidth(window.innerWidth)
+
+    syncFullscreenState()
+    syncViewportWidth()
+    window.addEventListener('resize', syncViewportWidth)
+    const unsubscribe = subscribeToFullscreenChanges(webApp, syncFullscreenState)
+    return () => {
+      window.removeEventListener('resize', syncViewportWidth)
+      unsubscribe()
+    }
+  }, [])
+
+  async function toggle() {
+    setError('')
+    try {
+      const nextState = await toggleTelegramFullscreen(getTelegramWebApp())
+      setIsFullscreen(nextState)
+    } catch {
+      setError(FULLSCREEN_ERROR_MESSAGE)
+    }
+  }
+
+  return {
+    available: canShowFullscreenControl(getTelegramWebApp(), viewportWidth),
+    error,
+    isFullscreen,
+    toggle
+  }
+}
+
+function FullscreenControl({ fullscreen }: { fullscreen: ReturnType<typeof useTelegramFullscreen> }) {
+  if (!fullscreen.available) return null
+  return (
+    <div className="fullscreen-control">
+      <button className="secondary-button fullscreen-button" onClick={fullscreen.toggle}>
+        {fullscreenButtonLabel(fullscreen.isFullscreen)}
+      </button>
+      {fullscreen.error && <span className="fullscreen-error" role="status" aria-live="polite">{fullscreen.error}</span>}
+    </div>
+  )
 }
 
 type PprFormState = {
@@ -928,12 +986,14 @@ function PprFormView({
   mode,
   initial,
   outlookEnabled,
+  fullscreenControl,
   onCancel,
   onSaved
 }: {
   mode: 'create' | 'edit'
   initial?: PprCard
   outlookEnabled: boolean
+  fullscreenControl: ReactNode
   onCancel: () => void
   onSaved: (item: PprCard) => void
 }) {
@@ -966,7 +1026,10 @@ function PprFormView({
 
   return (
     <main className="app-shell">
-      <button className="back-button" onClick={onCancel}>Назад</button>
+      <div className="detail-toolbar">
+        <button className="back-button" onClick={onCancel}>Назад</button>
+        {fullscreenControl}
+      </div>
       <article className="card detail-card">
         <div className="detail-header">
           <h1>{mode === 'create' ? 'Добавить ППР' : 'Редактировать ППР'}</h1>
@@ -991,7 +1054,7 @@ function PprFormView({
               <input type="time" value={form.start_time} onChange={event => setField('start_time', event.target.value)} />
             </label>
           </div>
-          <label>
+          <label className="form-grid-wide">
             <span>Активности / описание работ</span>
             <textarea value={form.activities} onChange={event => setField('activities', event.target.value)} />
           </label>
@@ -1005,7 +1068,7 @@ function PprFormView({
               <input value={form.outlook_link} onChange={event => setField('outlook_link', event.target.value)} />
             </label>
           )}
-          <label>
+          <label className="form-grid-wide">
             <span>Комментарий</span>
             <textarea value={form.comment} onChange={event => setField('comment', event.target.value)} />
           </label>
@@ -1026,7 +1089,8 @@ function CardView({
   onArchive,
   onRestore,
   onBack,
-  onChanged
+  onChanged,
+  fullscreenControl
 }: {
   item: PprCard
   currentUser: AppUser
@@ -1035,6 +1099,7 @@ function CardView({
   onRestore: (item: PprCard) => void
   onBack: () => void
   onChanged: (item: PprCard) => void
+  fullscreenControl: ReactNode
 }) {
   const [error, setError] = useState('')
   const [comment, setComment] = useState('')
@@ -1078,7 +1143,10 @@ function CardView({
 
   return (
     <main className="app-shell">
-      <button className="back-button" onClick={onBack}>Назад</button>
+      <div className="detail-toolbar">
+        <button className="back-button" onClick={onBack}>Назад</button>
+        {fullscreenControl}
+      </div>
       <article className="card detail-card">
         <div className="detail-header">
           <h1>{item.event.title}</h1>
@@ -1191,6 +1259,8 @@ export default function App() {
   const [deepLinkError, setDeepLinkError] = useState('')
   const [counts, setCounts] = useState<Partial<Record<TabKey, number>>>({})
   const deepLinkHandledRef = useRef(false)
+  const fullscreen = useTelegramFullscreen()
+  const fullscreenControl = <FullscreenControl fullscreen={fullscreen} />
 
   const notificationFromUrl = useMemo(() => getStartNotificationId(), [])
 
@@ -1452,6 +1522,7 @@ export default function App() {
         mode={editing.mode}
         initial={editing.item}
         outlookEnabled={outlookEnabled}
+        fullscreenControl={fullscreenControl}
         onCancel={() => setEditing(null)}
         onSaved={saveChangedCard}
       />
@@ -1468,6 +1539,7 @@ export default function App() {
         onRestore={restoreCard}
         onBack={() => setSelected(null)}
         onChanged={setSelected}
+        fullscreenControl={fullscreenControl}
       />
     )
   }
@@ -1482,7 +1554,10 @@ export default function App() {
           <h1>ППР</h1>
           <span className="user-role">{currentUser.role}</span>
         </div>
-        <div className="screen-count">{loading ? '...' : tab === 'users' ? counts.users ?? 0 : tab === 'deliveryErrors' ? counts.deliveryErrors ?? 0 : tab === 'importExcel' ? '-' : total}</div>
+        <div className="screen-header-actions">
+          {fullscreenControl}
+          <div className="screen-count">{loading ? '...' : tab === 'users' ? counts.users ?? 0 : tab === 'deliveryErrors' ? counts.deliveryErrors ?? 0 : tab === 'importExcel' ? '-' : total}</div>
+        </div>
       </header>
 
       {dashboard && (
