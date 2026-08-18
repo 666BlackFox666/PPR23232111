@@ -1,7 +1,8 @@
 import logging
 import socket
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from html import escape
+from zoneinfo import ZoneInfo
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -624,6 +625,14 @@ def render_notification_brief(notif: PprNotification) -> str:
     return f"#{notif.id} {time_text} {escape(e.title)}{project} [{STATUS_MAP.get(e.ppr_status, e.ppr_status)}]"
 
 
+def format_telegram_datetime(value: datetime | None) -> str | None:
+    """Format UTC status timestamps in the configured project timezone."""
+    if value is None:
+        return None
+    utc_value = value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
+    return utc_value.astimezone(ZoneInfo(get_settings().default_timezone)).strftime("%d.%m.%Y %H:%M")
+
+
 def render_notification_message(notif: PprNotification) -> str:
     e = notif.event
     kind = "ППР должна выйти" if notif.type == "start" else "ППР должна завершиться"
@@ -658,12 +667,14 @@ def render_notification_message(notif: PprNotification) -> str:
 
     if notif.taken_by_name:
         lines.append(f"<b>Проверяющий:</b> {escape(notif.taken_by_name)}")
-    if notif.taken_at:
-        lines.append(f"<b>Взято:</b> {notif.taken_at.strftime('%d.%m.%Y %H:%M')}")
+    taken_at = format_telegram_datetime(notif.taken_at)
+    if taken_at:
+        lines.append(f"<b>Взято:</b> {taken_at}")
     if notif.checked_by_name:
         lines.append(f"<b>Проверил:</b> {escape(notif.checked_by_name)}")
-    if notif.checked_at:
-        lines.append(f"<b>Проверено:</b> {notif.checked_at.strftime('%d.%m.%Y %H:%M')}")
+    checked_at = format_telegram_datetime(notif.checked_at)
+    if checked_at:
+        lines.append(f"<b>Проверено:</b> {checked_at}")
     return "\n".join(lines)
 
 
@@ -689,12 +700,14 @@ def render_notification_details(notif: PprNotification) -> str:
         lines.append(f"<b>Комментарий:</b> {escape(event.comment)}")
     if notif.taken_by_name:
         lines.append(f"<b>Взял в работу:</b> {escape(notif.taken_by_name)}")
-    if notif.taken_at:
-        lines.append(f"<b>Взято:</b> {notif.taken_at.strftime('%d.%m.%Y %H:%M')}")
+    taken_at = format_telegram_datetime(notif.taken_at)
+    if taken_at:
+        lines.append(f"<b>Взято:</b> {taken_at}")
     if notif.checked_by_name:
         lines.append(f"<b>Проверил:</b> {escape(notif.checked_by_name)}")
-    if notif.checked_at:
-        lines.append(f"<b>Проверено:</b> {notif.checked_at.strftime('%d.%m.%Y %H:%M')}")
+    checked_at = format_telegram_datetime(notif.checked_at)
+    if checked_at:
+        lines.append(f"<b>Проверено:</b> {checked_at}")
     outlook_url = event.outlook_url or event.outlook_link
     if outlook_url:
         lines.append(f"📅 Outlook: <a href=\"{escape(outlook_url, quote=True)}\">открыть событие</a>")

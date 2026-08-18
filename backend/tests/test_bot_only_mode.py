@@ -18,7 +18,7 @@ from app.config import get_settings
 from app.db.models import AppUser, AuditLog
 from app.db.session import Base
 from app.services.statuses import PPR_STATUS_IN_PROGRESS, PPR_STATUS_SCHEDULED
-from app.services.telegram_sender import render_notification_details
+from app.services.telegram_sender import format_telegram_datetime, render_notification_details, render_notification_message
 from app.services.user_service import (
     ROLE_ADMIN,
     ROLE_CHECKER,
@@ -37,8 +37,10 @@ class BotOnlyModeTestCase(unittest.TestCase):
             "TELEGRAM_BOT_USERNAME",
             "TELEGRAM_MINIAPP_SHORT_NAME",
             "ADMIN_TELEGRAM_IDS",
+            "DEFAULT_TIMEZONE",
         )}
         os.environ["ADMIN_TELEGRAM_IDS"] = "9001"
+        os.environ["DEFAULT_TIMEZONE"] = "Europe/Moscow"
         get_settings.cache_clear()
 
         handle = tempfile.NamedTemporaryFile(prefix="ppr-bot-only-", suffix=".db", delete=False)
@@ -109,6 +111,43 @@ class BotOnlyModeTestCase(unittest.TestCase):
         self.assertIn("Без Mini App", details)
         self.assertIn("Outlook", details)
         self.assertIn("@checker", details)
+        self.assertNotIn("<b>Проверено:</b>", details)
+
+    def test_telegram_status_times_are_rendered_in_project_timezone(self):
+        event = SimpleNamespace(
+            title="Проверка ППР",
+            project=None,
+            date=None,
+            start_time=None,
+            end_time=None,
+            ppr_status=PPR_STATUS_IN_PROGRESS,
+            activities=None,
+            responsible_setup=None,
+            responsible_report=None,
+            comment=None,
+            outlook_url=None,
+            outlook_link=None,
+            source_link=None,
+        )
+        notification = SimpleNamespace(
+            event=event,
+            type="start",
+            taken_by_name="@checker",
+            taken_at=datetime(2026, 8, 18, 6, 30),
+            checked_by_name="@admin",
+            checked_at=datetime(2026, 8, 18, 6, 30),
+        )
+
+        details = render_notification_details(notification)
+        message = render_notification_message(notification)
+
+        self.assertIn("<b>Взято:</b> 18.08.2026 09:30", details)
+        self.assertIn("<b>Проверено:</b> 18.08.2026 09:30", details)
+        self.assertIn("<b>Взято:</b> 18.08.2026 09:30", message)
+        self.assertIn("<b>Проверено:</b> 18.08.2026 09:30", message)
+
+    def test_telegram_status_time_formatter_handles_missing_value(self):
+        self.assertIsNone(format_telegram_datetime(None))
 
     def test_dryrun_with_no_due_notifications_is_safe_for_html_mode(self):
         class FakeMessage:
