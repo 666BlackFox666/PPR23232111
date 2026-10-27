@@ -3,7 +3,12 @@ import assert from 'node:assert/strict'
 
 import { api, filenameFromContentDisposition } from './api.ts'
 import { matchByMethodEntries, summaryGridEntries } from './importSummary.ts'
-import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport.ts'
+import {
+  canShowPprExport,
+  runPprExportDownload,
+  savePprExportDownload,
+  savePprExportFile
+} from './pprExport.ts'
 import {
   FULLSCREEN_ERROR_MESSAGE,
   canShowFullscreenControl,
@@ -46,6 +51,37 @@ test('export request uses relative URL, Telegram auth header, Blob, and response
     assert.ok(result.blob instanceof Blob)
     assert.equal(await result.blob.text(), 'xlsx-content')
     assert.equal(result.filename, 'PPR_export_2026-08-04_12-30.xlsx')
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('native export ticket request uses POST and Telegram authorization', async () => {
+  const previousWindow = globalThis.window
+  const previousFetch = globalThis.fetch
+  let request
+  globalThis.window = {
+    Telegram: { WebApp: { initData: 'signed-telegram-init-data' } }
+  }
+  globalThis.fetch = async (url, options) => {
+    request = { url, options }
+    return new Response(JSON.stringify({
+      url: '/api/export/ppr-download/signed-token',
+      filename: 'PPR_export.xlsx',
+      expires_at: '2026-08-04T09:32:00+00:00'
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    })
+  }
+
+  try {
+    const result = await api.preparePprExportDownload()
+    assert.equal(request.url, '/api/export/ppr-download')
+    assert.equal(request.options.method, 'POST')
+    assert.equal(request.options.headers['X-Telegram-Init-Data'], 'signed-telegram-init-data')
+    assert.equal(result.url, '/api/export/ppr-download/signed-token')
   } finally {
     globalThis.window = previousWindow
     globalThis.fetch = previousFetch
@@ -100,6 +136,58 @@ test('download error is shown and loading is always reset', async () => {
   assert.deepEqual(loading, [true, false])
   assert.deepEqual(errors, ['', 'Экспорт временно недоступен'])
   assert.deepEqual(saved, [])
+})
+
+test('Telegram native download receives an absolute HTTPS URL and server filename', async () => {
+  const calls = []
+  const succeeded = await runPprExportDownload(
+    async () => ({
+      url: '/api/export/ppr-download/signed-token',
+      filename: 'PPR_export_2026-08-04_12-30.xlsx'
+    }),
+    ticket => savePprExportDownload(ticket, {
+      currentUrl: 'https://ppr.example.test/app',
+      webApp: {
+        downloadFile: (params, callback) => {
+          calls.push(params)
+          callback(true)
+        }
+      },
+      navigate: url => calls.push({ navigate: url })
+    }),
+    () => {},
+    () => {}
+  )
+
+  assert.equal(succeeded, true)
+  assert.deepEqual(calls, [{
+    url: 'https://ppr.example.test/api/export/ppr-download/signed-token',
+    file_name: 'PPR_export_2026-08-04_12-30.xlsx'
+  }])
+})
+
+test('native download falls back to Telegram openLink and then browser navigation', async () => {
+  const opened = []
+  const ticket = {
+    url: '/api/export/ppr-download/signed-token',
+    filename: 'PPR_export.xlsx'
+  }
+
+  await savePprExportDownload(ticket, {
+    currentUrl: 'https://ppr.example.test/app',
+    webApp: { openLink: url => opened.push(`telegram:${url}`) },
+    navigate: url => opened.push(`browser:${url}`)
+  })
+  await savePprExportDownload(ticket, {
+    currentUrl: 'https://ppr.example.test/app',
+    webApp: undefined,
+    navigate: url => opened.push(`browser:${url}`)
+  })
+
+  assert.deepEqual(opened, [
+    'telegram:https://ppr.example.test/api/export/ppr-download/signed-token',
+    'browser:https://ppr.example.test/api/export/ppr-download/signed-token'
+  ])
 })
 
 test('Content-Disposition parser supports UTF-8 names and rejects unsafe paths', () => {

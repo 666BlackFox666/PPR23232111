@@ -66,6 +66,17 @@ class PprExcelExport:
     generated_at: datetime
 
 
+def ppr_excel_export_filename(now: datetime | None = None) -> tuple[str, datetime]:
+    configured_timezone = ZoneInfo(get_settings().default_timezone)
+    if now is None:
+        generated_at = datetime.now(configured_timezone)
+    elif now.tzinfo is None:
+        generated_at = now.replace(tzinfo=configured_timezone)
+    else:
+        generated_at = now.astimezone(configured_timezone)
+    return f"PPR_export_{generated_at.strftime('%Y-%m-%d_%H-%M')}.xlsx", generated_at
+
+
 def _set_text_cell(cell, value: str) -> None:
     """Keep user text as text even when it starts with an Excel formula marker."""
     cell.value = value
@@ -192,13 +203,7 @@ def _append_info_sheet(workbook: Workbook, events: list[PprEvent], user, generat
 
 
 def build_ppr_excel_export(db: Session, user, now: datetime | None = None) -> PprExcelExport:
-    timezone = ZoneInfo(get_settings().default_timezone)
-    if now is None:
-        generated_at = datetime.now(timezone)
-    elif now.tzinfo is None:
-        generated_at = now.replace(tzinfo=timezone)
-    else:
-        generated_at = now.astimezone(timezone)
+    filename, generated_at = ppr_excel_export_filename(now)
 
     events = (
         db.query(PprEvent)
@@ -215,7 +220,6 @@ def build_ppr_excel_export(db: Session, user, now: datetime | None = None) -> Pp
 
     output = BytesIO()
     workbook.save(output)
-    filename = f"PPR_export_{generated_at.strftime('%Y-%m-%d_%H-%M')}.xlsx"
     return PprExcelExport(
         content=output.getvalue(),
         filename=filename,

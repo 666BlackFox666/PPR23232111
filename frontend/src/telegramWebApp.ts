@@ -11,6 +11,11 @@ export interface TelegramWebApp {
   expand?: () => void
   requestFullscreen?: () => void | Promise<void>
   exitFullscreen?: () => void | Promise<void>
+  downloadFile?: (
+    params: { url: string; file_name: string },
+    callback?: (accepted: boolean) => void
+  ) => void
+  openLink?: (url: string, options?: { try_instant_view?: boolean }) => void
   onEvent?: (event: TelegramWebAppEvent, handler: TelegramWebAppEventHandler) => void
   offEvent?: (event: TelegramWebAppEvent, handler: TelegramWebAppEventHandler) => void
 }

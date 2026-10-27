@@ -25,7 +25,11 @@ from app.services.outlook_graph import (
     outlook_integration_configured,
     sync_notification_outlook_link,
 )
-from app.services.ppr_excel_export import XLSX_MEDIA_TYPE, build_ppr_excel_export
+from app.services.ppr_excel_export import XLSX_MEDIA_TYPE, build_ppr_excel_export, ppr_excel_export_filename
+from app.services.ppr_export_download import (
+    create_ppr_export_download_token,
+    read_ppr_export_download_token,
+)
 from app.services.ppr_service import (
     WorkflowConflict,
     add_comment,
@@ -167,12 +171,7 @@ async def import_excel_apply_endpoint(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/api/export/ppr.xlsx")
-def export_ppr_excel(
-    db: Session = Depends(get_db),
-    user: AppUser = Depends(require_roles(ROLE_ADMIN)),
-):
-    export = build_ppr_excel_export(db, user)
+def _record_ppr_export_audit(db: Session, user: AppUser, export) -> None:
     generated_at_utc = export.generated_at.astimezone(timezone.utc).replace(tzinfo=None)
     db.add(
         AuditLog(
@@ -192,11 +191,60 @@ def export_ppr_excel(
     except Exception:
         db.rollback()
         raise
+
+
+def _ppr_export_response(export, telegram_download: bool = False) -> Response:
+    headers = {
+        "Content-Disposition": f'attachment; filename="{export.filename}"',
+        "Cache-Control": "no-store",
+    }
+    if telegram_download:
+        headers["Access-Control-Allow-Origin"] = "https://web.telegram.org"
     return Response(
         content=export.content,
         media_type=XLSX_MEDIA_TYPE,
-        headers={"Content-Disposition": f'attachment; filename="{export.filename}"'},
+        headers=headers,
     )
+
+
+@router.get("/api/export/ppr.xlsx")
+def export_ppr_excel(
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_roles(ROLE_ADMIN)),
+):
+    export = build_ppr_excel_export(db, user)
+    _record_ppr_export_audit(db, user, export)
+    return _ppr_export_response(export)
+
+
+@router.post("/api/export/ppr-download")
+def prepare_ppr_excel_download(user: AppUser = Depends(require_roles(ROLE_ADMIN))):
+    token, grant = create_ppr_export_download_token(user.id, get_settings().telegram_bot_token)
+    filename, _ = ppr_excel_export_filename(grant.generated_at)
+    return {
+        "url": f"/api/export/ppr-download/{token}",
+        "filename": filename,
+        "expires_at": grant.expires_at.isoformat(),
+    }
+
+
+@router.get("/api/export/ppr-download/{token}")
+def download_ppr_excel_with_token(token: str, db: Session = Depends(get_db)):
+    grant = read_ppr_export_download_token(token, get_settings().telegram_bot_token)
+    if grant is None:
+        raise HTTPException(status_code=404, detail="Download link is invalid or expired")
+    user = (
+        db.query(AppUser)
+        .filter(AppUser.id == grant.user_id)
+        .filter(AppUser.role == ROLE_ADMIN)
+        .filter(AppUser.is_active.is_(True))
+        .one_or_none()
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="Download link is invalid or expired")
+    export = build_ppr_excel_export(db, user, now=grant.generated_at)
+    _record_ppr_export_audit(db, user, export)
+    return _ppr_export_response(export, telegram_download=True)
 
 
 @router.get("/api/ppr/today")

@@ -10,12 +10,12 @@ from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from urllib.parse import urlencode
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from openpyxl import load_workbook
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.api.routes import router
+from app.api.routes import download_ppr_excel_with_token, prepare_ppr_excel_download, router
 from app.config import get_settings
 from app.db.models import AppUser, AuditLog, PprEvent, PprNotification
 from app.db.session import Base, get_db
@@ -32,6 +32,10 @@ from app.services.ppr_excel_export import (
     SERVICE_SHEET_NAME,
     XLSX_MEDIA_TYPE,
     build_ppr_excel_export,
+)
+from app.services.ppr_export_download import (
+    create_ppr_export_download_token,
+    read_ppr_export_download_token,
 )
 from app.services.statuses import PPR_STATUS_ARCHIVED, PPR_STATUS_IN_PROGRESS, PPR_STATUS_VERIFIED
 from app.services.user_service import ROLE_ADMIN, ROLE_CHECKER
@@ -251,7 +255,12 @@ class PprExcelExportTestCase(unittest.TestCase):
         values["hash"] = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
         return urlencode(values)
 
-    async def asgi_get(self, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
+    async def asgi_request(
+        self,
+        method: str,
+        path: str,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
         request_pending = True
         sent_messages = []
 
@@ -273,7 +282,7 @@ class PprExcelExportTestCase(unittest.TestCase):
             "type": "http",
             "asgi": {"version": "3.0", "spec_version": "2.3"},
             "http_version": "1.1",
-            "method": "GET",
+            "method": method,
             "scheme": "http",
             "path": path,
             "raw_path": path.encode("ascii"),
@@ -295,6 +304,12 @@ class PprExcelExportTestCase(unittest.TestCase):
             if message["type"] == "http.response.body"
         )
         return start["status"], response_headers, body
+
+    async def asgi_get(self, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
+        return await self.asgi_request("GET", path, headers)
+
+    async def asgi_post(self, path: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
+        return await self.asgi_request("POST", path, headers)
 
     @staticmethod
     def _table_snapshot(db, model) -> list[tuple]:
@@ -404,6 +419,56 @@ class PprExcelExportTestCase(unittest.TestCase):
     def test_export_route_is_registered_as_get(self):
         route = next(item for item in router.routes if item.path == "/api/export/ppr.xlsx")
         self.assertEqual(route.methods, {"GET"})
+
+    def test_admin_prepares_native_download_and_signed_url_downloads_without_auth(self):
+        with self.SessionLocal() as db:
+            admin = db.query(AppUser).filter(AppUser.telegram_id == "9001").one()
+            ticket = prepare_ppr_excel_download(admin)
+            response = download_ppr_excel_with_token(ticket["url"].rsplit("/", 1)[-1], db)
+
+        self.assertRegex(ticket["url"], r"^/api/export/ppr-download/[A-Za-z0-9_.-]+$")
+        self.assertRegex(ticket["filename"], r"^PPR_export_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}\.xlsx$")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.media_type, XLSX_MEDIA_TYPE)
+        self.assertEqual(response.headers["access-control-allow-origin"], "https://web.telegram.org")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(
+            response.headers["content-disposition"],
+            f'attachment; filename="{ticket["filename"]}"',
+        )
+        workbook = load_workbook(BytesIO(response.body), data_only=False)
+        self.assertEqual(workbook.sheetnames, [MAIN_SHEET_NAME, SERVICE_SHEET_NAME, INFO_SHEET_NAME])
+
+        with self.SessionLocal() as db:
+            audits = db.query(AuditLog).filter(AuditLog.action == "ppr_excel_export").all()
+            self.assertEqual(len(audits), 1)
+            self.assertEqual(audits[0].user_id, "9001")
+
+    def test_native_download_routes_are_registered_and_tampering_is_rejected(self):
+        prepare_route = next(item for item in router.routes if item.path == "/api/export/ppr-download")
+        download_route = next(item for item in router.routes if item.path == "/api/export/ppr-download/{token}")
+        self.assertEqual(prepare_route.methods, {"POST"})
+        self.assertEqual(download_route.methods, {"GET"})
+
+        with self.SessionLocal() as db:
+            for invalid_token in ("not-a-valid-token", "***.***"):
+                with self.subTest(invalid_token=invalid_token):
+                    with self.assertRaises(HTTPException) as raised:
+                        download_ppr_excel_with_token(invalid_token, db)
+                    self.assertEqual(raised.exception.status_code, 404)
+
+    def test_native_download_token_is_signed_and_expires(self):
+        now = datetime(2026, 8, 4, 9, 30, tzinfo=timezone.utc)
+        token, issued = create_ppr_export_download_token(17, "test-secret", now=now)
+
+        valid = read_ppr_export_download_token(token, "test-secret", now=now + timedelta(seconds=30))
+        wrong_secret = read_ppr_export_download_token(token, "wrong-secret", now=now)
+        expired = read_ppr_export_download_token(token, "test-secret", now=issued.expires_at)
+
+        self.assertIsNotNone(valid)
+        self.assertEqual(valid.user_id, 17)
+        self.assertIsNone(wrong_secret)
+        self.assertIsNone(expired)
 
     def test_unchanged_export_preview_and_apply_do_not_mutate_events_or_notifications(self):
         with self.SessionLocal() as db:

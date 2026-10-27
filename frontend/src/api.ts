@@ -17,6 +17,12 @@ export interface PprExportFile {
   filename: string
 }
 
+export interface PprExportDownloadTicket {
+  url: string
+  filename: string
+  expires_at: string
+}
+
 export function getTelegramInitData() {
   return window.Telegram?.WebApp?.initData || ''
 }
@@ -120,6 +126,10 @@ async function requestPprExport(): Promise<PprExportFile> {
   }
 }
 
+async function preparePprExportDownload(): Promise<PprExportDownloadTicket> {
+  return request<PprExportDownloadTicket>('/api/export/ppr-download', { method: 'POST' })
+}
+
 function importForm(file: File | null, mode: ImportMode, previewId?: string, confirmForce = false) {
   const form = new FormData()
   form.append('mode', mode)
@@ -190,5 +200,6 @@ export const api = {
     '/api/import/excel/apply',
     importForm(file, mode, previewId, confirmForce)
   ),
-  exportPpr: requestPprExport
+  exportPpr: requestPprExport,
+  preparePprExportDownload
 }

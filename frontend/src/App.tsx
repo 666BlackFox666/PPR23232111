@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ApiError, api, getAuthMode } from './api'
 import { matchByMethodEntries, summaryGridEntries } from './importSummary'
-import { canShowPprExport, runPprExportDownload, savePprExportFile } from './pprExport'
+import { canShowPprExport, runPprExportDownload, savePprExportDownload } from './pprExport'
 import {
   FULLSCREEN_ERROR_MESSAGE,
   canShowFullscreenControl,
@@ -844,8 +844,8 @@ function ImportExcelView({ currentUser }: { currentUser: AppUser }) {
 
   async function downloadExport() {
     await runPprExportDownload(
-      api.exportPpr,
-      savePprExportFile,
+      api.preparePprExportDownload,
+      savePprExportDownload,
       setExportLoading,
       setExportError
     )
